@@ -37,12 +37,25 @@ def _git(*args: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout or ""
 
 
+def _git_bytes(*args: str) -> tuple[int, bytes]:
+    try:
+        proc = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return 1, b""
+    return proc.returncode, proc.stdout or b""
+
+
 def tracked_files() -> list[Path] | None:
-    """git 已跟踪的文件（相对路径转绝对）。不是 git 仓库时返回 None。"""
-    code, out = _git("ls-files")
+    """git 已跟踪的文件（相对路径转绝对）。不是 git 仓库时返回 None。
+
+    用 ``-z`` 取 NUL 分隔的原始字节：默认输出会把中文路径转义成 ``"docs/\\345..."``，
+    那样做 ``is_file()`` 判断会全部失败，中文名文件就被**静默跳过**了。
+    """
+    code, out = _git_bytes("ls-files", "-z")
     if code != 0:
         return None
-    files = [ROOT / line.strip() for line in out.splitlines() if line.strip()]
+    names = out.decode("utf-8", errors="replace").split("\0")
+    files = [ROOT / name for name in names if name.strip()]
     return [path for path in files if path.is_file()]
 
 
