@@ -132,7 +132,7 @@ class GateUiTests(unittest.TestCase):
             self.assertFalse(at.exception)
             labels = [w.label for w in at.text_input]
             self.assertIn("访问口令", labels)
-            self.assertFalse(any("开始智能分析" == b.label for b in at.button),
+            self.assertFalse(any("帮我分析" == b.label for b in at.button),
                              "口令未通过时不应渲染主界面按钮")
 
     def test_gate_passes_with_correct_code(self):

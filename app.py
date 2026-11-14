@@ -21,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from betterbuy.adapters import collect, supported_platforms
-from betterbuy.advisor import llm_advice, llm_available, llm_blocked_reason, rule_advice
+from betterbuy.advisor import llm_advice, llm_available, rule_advice
 from betterbuy.catalog import PRICE_BAND_NOTE, all_names, key_of_name
 from betterbuy.discovery import discover
 from betterbuy.discovery.ecommerce import same_product_across
@@ -38,7 +38,7 @@ from betterbuy.pdd_search import search as pdd_keyword_search
 from betterbuy.ration import MODE_LABEL as RATION_MODE_LABEL
 from betterbuy.recommend import DEFAULT_WEIGHTS, PICK_ORDER, PICK_TITLES, recommend
 from betterbuy.risk import LEVEL_HIGH, LEVEL_OK, LEVEL_TODO
-from betterbuy.site import GITHUB_URL, OFFICIAL_URL
+from betterbuy.site import GITHUB_URL, OFFICIAL_URL, PROJECT_NAME
 from betterbuy.wise import MAX_LINKS_PER_ANALYSIS, run as run_wise
 from betterbuy.zero_cost import daily_limit, public_demo, usage_summary
 from scoring import score_items
@@ -68,25 +68,66 @@ def _stretch_key() -> dict:
 
 FIT = _stretch_key()
 
-# 仅做排版适配，不含任何动画，不影响加载速度。
-st.markdown(
-    """
-    <style>
-    @media (max-width: 640px) {
-      h1 { font-size: 1.7rem !important; line-height: 1.25 !important; }
-      h2, h3 { font-size: 1.15rem !important; }
-      [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
-      .block-container { padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 st.set_page_config(
     page_title="BetterBuy 智选 · 理性消费助手",
     page_icon="🛍️",
     layout="wide",
+)
+
+# 仅做排版适配，不含任何动画，不影响加载速度。
+# 设计目标（来自用户反馈）：
+#   1. 首屏是「产品名 + 一句话价值 + 需求输入框」，技术说明全部后置；
+#   2. 辅助文字提高对比度，别让灰色小字抢注意力；
+#   3. 主按钮明显比其它按钮大，让人一眼知道点哪里。
+st.markdown(
+    """
+    <style>
+    /* 顶部留白收紧（默认 ~6rem 太大，首屏被推下去）；宽屏上限避免输入框被拉成一条 */
+    .block-container { padding-top: 1.9rem !important; max-width: 1180px !important; }
+    header[data-testid="stHeader"] { background: transparent; }
+
+    /* 首屏品牌区 */
+    .bb-hero { margin: 0 0 0.55rem 0; }
+    .bb-hero .bb-brand {
+      font-size: 2rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15;
+    }
+    .bb-hero .bb-tagline {
+      margin-top: 0.5rem; font-size: 1.2rem; font-weight: 500; line-height: 1.45;
+      opacity: 0.9;
+    }
+    .bb-hero .bb-lead {
+      margin-top: 0.45rem; font-size: 0.97rem; line-height: 1.6; opacity: 0.86;
+    }
+
+    /* 主导航只三页，字号给足，别像灰色链接（tab 是 div[role=tab]，不是 button） */
+    [data-testid="stTab"] p { font-size: 1rem !important; font-weight: 600 !important; }
+
+    /* 辅助文字提高对比度：默认太浅，长句读起来费力 */
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+      color: var(--text-color, inherit) !important; opacity: 0.82;
+    }
+    /* 标题前后留白收紧 */
+    h2, h3 { padding-top: 0.4rem !important; margin-top: 0.2rem !important; }
+
+    /* 主按钮是首屏视觉中心（表单提交按钮的 kind 是 primaryFormSubmit，要单独写） */
+    [data-testid="stBaseButton-primary"], button[kind="primary"],
+    [data-testid="stBaseButton-primaryFormSubmit"], button[kind="primaryFormSubmit"] {
+      min-height: 2.9rem; font-size: 1.02rem; font-weight: 700; border-radius: 0.7rem;
+    }
+
+    @media (max-width: 640px) {
+      .bb-hero .bb-brand { font-size: 1.62rem !important; }
+      .bb-hero .bb-tagline { font-size: 1.1rem !important; }
+      h1, h2, h3 { font-size: 1.15rem !important; line-height: 1.3 !important; }
+      [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
+      .block-container { padding-left: 0.8rem !important; padding-right: 0.8rem !important; }
+      /* 窄屏上示例按钮会竖排，压扁一点免得把首屏撑太长 */
+      [data-testid="stBaseButton-secondary"] { min-height: 2.2rem !important; }
+      [data-testid="stBaseButton-secondary"] p { font-size: 0.9rem !important; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -180,6 +221,33 @@ def _render_product_block(product: Product) -> None:
                 st.caption(f"商品链接：接口未返回（不拼接猜测链接） · {stamp}")
 
 
+def _data_stamp(w) -> str:
+    """本次商品数据里最新的采集时间（没有就返回空字符串）。"""
+    stamps = [p.fetched_at for p in w.products if p.fetched_at]
+    return max(stamps) if stamps else ""
+
+
+def _analysis_meta(w) -> str:
+    """一行说清：这次用什么方式分析、数据从哪来、什么时候取的。
+
+    用户反馈的原话是「需要知道结论依据是什么」，所以这一行放在结论正下方，
+    而不是埋进折叠面板里。
+    """
+    parts = ["分析方式：规则引擎（非大模型）"]
+    if w.products:
+        platforms = sorted({p.platform for p in w.products if p.platform})
+        parts.append(f"数据来源：{'、'.join(platforms)} 官方公开接口 · {len(w.products)} 件商品")
+        stamp = _data_stamp(w)
+        parts.append(f"数据更新时间：{stamp}" if stamp else "数据更新时间：未记录")
+        if w.searched_keyword:
+            parts.append(f"搜索关键词：{w.searched_keyword}")
+    elif w.searched_keyword:
+        parts.append(f"数据来源：无（按「{w.searched_keyword}」搜索未取到商品，只做需求分析）")
+    else:
+        parts.append("数据来源：无（本次只做需求分析）")
+    return " · ".join(parts)
+
+
 def render_wise(w) -> None:
     """渲染一次「智选」分析结果。所有判断都在 betterbuy 里完成，这里只负责展示。"""
     r = w.ration
@@ -192,7 +260,40 @@ def render_wise(w) -> None:
         getattr(st, style)(
             f"{icon} **{r.verdict}**（置信度：{r.confidence}）  \n{r.headline}"
         )
-    st.caption(f"判定方式：{RATION_MODE_LABEL}。每条结论都能在页面底部「查看分析依据」里回溯。")
+
+    # 结论正下方：怎么分析的、数据从哪来、什么时候取的
+    st.caption(_analysis_meta(w))
+
+    # 省钱替代路径是产品定位（理性/绿色消费）的第一落点，放在结论之后而不是页面末尾。
+    # 不用行内代码样式：反引号渲染成灰底等宽块，对普通用户像技术报错。
+    if w.green.items:
+        st.markdown(
+            "**先别急着下单**　"
+            + " → ".join(w.green.ladder)
+            + f"　（按「{w.green.family_label}」品类，详细见 ④）"
+        )
+
+    with st.expander("这次的分析方式、数据来源与能力限制"):
+        st.markdown(
+            f"- **分析方式**：{RATION_MODE_LABEL}。没有调用大模型，"
+            "结论由关键词、判定表与阈值算出，每一条都能在页面底部「查看分析依据」里回溯。"
+        )
+        if w.products:
+            stamp = _data_stamp(w) or "未记录"
+            platforms = sorted({p.platform for p in w.products if p.platform})
+            st.markdown(
+                f"- **数据来源**：{'、'.join(platforms)} 官方公开接口，共 {len(w.products)} 件商品，"
+                f"采集时间 {stamp}。价格是采集时刻的公开标价，不含运费、税费与券后价。"
+            )
+        else:
+            st.markdown(
+                "- **数据来源**：本次没有拿到商品数据，所以没有价格、评分或商品卡片。"
+                "下面的判断、省钱路径与风险清单不依赖商品数据，仍然可用。"
+            )
+        st.markdown(
+            "- **能力限制**：本页不做同款跨平台比价；平台不提供好评率时不给口碑分；"
+            "缺失字段不估算、不补零；不预测价格走势。"
+        )
 
     for note in w.notes:
         (st.warning if note.startswith(("⚠️", "❌")) else st.caption)(note)
@@ -271,8 +372,10 @@ def render_wise(w) -> None:
             "或数据源未返回价格。**本项目不会为了凑一个比较而编造价格。**"
         )
 
-    # ---------------- ③ AI 购买建议 ----------------
-    st.subheader("③ AI 购买建议")
+    # ---------------- ③ 购买建议 ----------------
+    # 标题里不再写「AI」：这一页的结论全部由本地规则引擎算出（零成本模式下禁止调用大模型），
+    # 写「AI 购买建议」会让用户以为结论来自大模型，属于误导。
+    st.subheader("③ 购买建议与理由")
     with st.container(border=True):
         st.markdown("**我是这样理解你的需求的**")
         st.markdown("- " + w.intent.evidence_line())
@@ -464,86 +567,100 @@ def init_state() -> None:
     st.session_state.setdefault("legacy", pd.DataFrame(columns=LEGACY_COLUMNS))
     st.session_state.setdefault("weights", dict(DEFAULT_WEIGHTS))
     st.session_state.setdefault("wise", None)
+    # 输入区与高级设置的默认值。
+    # 放在这里而不是塞在 widget 的 value= 上，是因为「购买建议」页要先读这些值，
+    # 而控件本身渲染在后面的「使用说明 · 高级设置」里。
+    st.session_state.setdefault("wise_query", "")
+    st.session_state.setdefault("wise_category", "自动识别")
+    st.session_state.setdefault("wise_discover", True)
+    st.session_state.setdefault("use_cache", True)
 
 
 init_state()
 
 
 # ---------------------------------------------------------------- 页面头部
-st.title("🛍️ BetterBuy 智选")
-st.caption("面向大学生的 AI 理性消费与绿色消费助手 · AI青年行·2026高校好事计划 参赛作品")
+# 首屏只放三样东西：产品名、一句话价值、需求输入框。
+# 参赛信息、数据声明、运行状态、配额全部后置（页脚 / 高级设置）。
 st.markdown(
-    "**先问「该不该买」，再问「买哪一个」。** "
-    "粘贴一个商品链接，或者直接用一句话说清你想买什么——"
-    "系统会给出「推荐购买 / 建议进一步比较 / 建议暂缓购买」的结论、"
-    "更省钱的替代路径，以及下单前必须确认的风险点。"
+    """
+    <div class="bb-hero">
+      <div class="bb-brand">🛍️ BetterBuy 智选</div>
+      <div class="bb-tagline">先想清楚该不该买，再选适合你的。</div>
+      <div class="bb-lead">粘贴商品链接，或说说你的需求，看看购买建议、省钱替代方案和注意事项。</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
-st.info(
-    "数据全部来自官方公开接口与公开页面，不绕过登录、验证码或访问限制。"
-    "拿不到的字段一律显示「数据源未提供」，不用估算值或示例数据顶替。"
+
+# 原来这里是三行说明 + 一个蓝色 info 块 + 两行配额。现在压成一句，细节移到「使用说明 · 高级设置」。
+st.caption(
+    "数据来自官方公开接口与公开页面；拿不到的字段写「数据源未提供」，不用估算值顶替。"
 )
 
 _usage = usage_summary()
-_zc_label = "零成本模式：开启" if _usage["zero_cost"] else "零成本模式：已关闭（可能产生费用）"
-_usage_line = (
-    f"{_zc_label} · 今日外部请求 {_usage['used']}/{_usage['limit']} 次"
-    f"（剩余 {_usage['remaining']}）· 大模型调用：{'禁止' if _usage['zero_cost'] else '允许'}"
-)
 if _usage["blocked_sources"]:
-    st.warning(_usage_line + f" · 已达上限的数据源：{'、'.join(_usage['blocked_sources'])}")
-else:
-    st.caption(_usage_line + " · 额度用尽后相关请求会被直接拦下，不会产生费用")
-
-if public_demo():
-    st.caption(
-        "公网演示模式：本页任何人都能打开，所以每日上限已收紧"
-        f"（电商各 {daily_limit('pdd')} 次、合计 {_usage['limit']} 次），"
-        "避免陌生访客把开发者自己的接口额度烧完。额度用尽后相关按钮会直接拒绝请求，不会产生费用。"
+    # 只在真的撞到上限时才打扰用户——这是唯一必须让他知道的状态
+    st.warning(
+        f"今日额度已用完（{_usage['used']}/{_usage['limit']}）："
+        f"{'、'.join(_usage['blocked_sources'])} 的请求会被直接拦下，不会产生费用。"
+        "需求分析与省钱建议不受影响。"
     )
 
-tab_wise, tab_auto, tab_manual, tab_about = st.tabs(
-    ["① 智选 · 理性消费分析", "② 自动识别与智能比价", "③ 手动录入与自定义权重",
-     "④ 说明与限制"]
-)
+tab_wise, tab_compare, tab_about = st.tabs(["购买建议", "商品对比", "使用说明"])
 
-# ================================================================ ① 智选
+# ================================================================ ① 购买建议
+# 首页示例：点一下就填进输入框，不用手动复制。
+# （用 on_click 回调而不是直接赋值：回调在脚本重跑前执行，此时输入框还没实例化，
+#   写 session_state 是合法的；如果先渲染输入框再赋值，Streamlit 会直接报错。）
+WISE_EXAMPLES: list[tuple[str, str]] = [
+    ("1000 元选显示器",
+     "想买个外接显示器，预算 1000 元，主要用来写代码，笔记本是拯救者 Y7000P"),
+    ("手机该修还是换",
+     "现在用的手机电池一天要充三次，想换个新的，预算 3000 元，"
+     "但也不确定是不是修一下、换块电池就够了"),
+    ("开学用品采购",
+     "开学要买的东西有点多：台灯、插排、水杯，预算 300 元，想先分清哪些是真的必需"),
+    ("先看看要不要买",
+     "最近很想买个降噪耳机，但大部分时间都在宿舍，不确定自己是不是真的需要"),
+]
+
+
+def _fill_example(text: str) -> None:
+    st.session_state["wise_query"] = text
+
+
 with tab_wise:
-    st.markdown("##### 说说你想买什么")
-    st.caption(
-        "三种写法都行：**只写商品名称**（最省事）· **粘贴商品链接** · **直接描述需求**。"
-        f"一次最多 {MAX_LINKS_PER_ANALYSIS} 个链接。不需要填价格、评分或参数，也不需要配置任何 API。"
+    query = st.text_area(
+        "商品链接或购买需求",
+        key="wise_query",
+        height=104,
+        placeholder=(
+            "只写商品名：机械键盘 87 键\n"
+            "贴链接：https://store.steampowered.com/app/413150/\n"
+            "说需求：想买个外接显示器，预算 1000 元，每天写代码要用"
+        ),
+        label_visibility="collapsed",
     )
 
-    with st.form("wise_form"):
-        query = st.text_area(
-            "商品链接或购买需求",
-            height=110,
-            placeholder=(
-                "例 1｜只写商品名：机械键盘 87 键\n"
-                "例 2｜贴链接：https://store.steampowered.com/app/413150/\n"
-                "例 3｜说需求：我的笔记本是联想拯救者 Y7000P，想买个外接显示器，"
-                "预算 1000 元，每天写代码要用"
-            ),
-            label_visibility="collapsed",
+    c1, c2 = st.columns([1, 1.15], vertical_alignment="bottom")
+    with c1:
+        cap = st.number_input(
+            "预算（元，可选）",
+            min_value=0,
+            value=None,
+            step=50,
+            placeholder="可选，例如 1000",
+            help="留空表示不限预算；也可以直接写在需求里，例如「预算 800 元」",
         )
-        c1, c2, c3 = st.columns([1.3, 1, 1])
-        with c1:
-            cat_pick = st.selectbox(
-                "商品品类", ["自动识别"] + all_names(), index=0,
-                help="自动识别不准时再手动改；改了会在结果里说明",
-            )
-        with c2:
-            cap = st.number_input(
-                "预算上限（元，可留空）", min_value=0, value=0, step=50,
-                help="也可以直接写在需求里，例如「预算 800 元」",
-            )
-        with c3:
-            auto_discover = st.checkbox(
-                "顺带比同类商品", value=True,
-                help="目前只对 Steam 有效；其他平台不会假装能找到同类",
-            )
-        use_cache = st.checkbox("优先使用本地缓存（1 小时内更省请求）", value=True)
-        go = st.form_submit_button("开始智能分析", type="primary")
+    with c2:
+        go = st.button("帮我分析", type="primary", use_container_width=True)
+
+    st.caption("试一试：")
+    for col, (label, text) in zip(st.columns(len(WISE_EXAMPLES)), WISE_EXAMPLES):
+        with col:
+            st.button(label, key=f"eg_{label}", on_click=_fill_example, args=(text,),
+                      use_container_width=True)
 
     if go:
         if not query.strip():
@@ -553,10 +670,13 @@ with tab_wise:
                 try:
                     st.session_state.wise = run_wise(
                         query,
-                        category_key=key_of_name(cat_pick) if cat_pick != "自动识别" else "",
+                        category_key=(
+                            key_of_name(st.session_state["wise_category"])
+                            if st.session_state["wise_category"] != "自动识别" else ""
+                        ),
                         budget_cap=float(cap or 0),
-                        auto_discover=auto_discover,
-                        use_cache=use_cache,
+                        auto_discover=bool(st.session_state["wise_discover"]),
+                        use_cache=bool(st.session_state["use_cache"]),
                         search_fn=pdd_keyword_search,
                     )
                 except Exception as exc:  # 兜底：不让一次异常把整页打白
@@ -565,24 +685,31 @@ with tab_wise:
 
     _wise = st.session_state.get("wise")
     if not _wise:
+        st.caption(
+            "三种写法都行：只写商品名（最省事）、粘贴商品链接、或者直接说需求。"
+            f"一次最多 {MAX_LINKS_PER_ANALYSIS} 个链接。不需要填价格、评分或参数。"
+        )
         with st.container(border=True):
-            st.markdown("**还没有分析结果。** 三个可以直接复制的例子：")
+            st.markdown("**还没有分析结果。** 也可以先看这几个问题：")
             st.markdown(
-                "- **只写商品名**：机械键盘 87 键\n"
-                "- **说需求**：我的笔记本是联想拯救者 Y7000P，想买个外接显示器，"
-                "预算 1000 元，每天写代码要用\n"
-                "- **修还是换**：我现在用的手机电池一天要充三次，想换个新的，预算 3000 元"
+                "- **要不要买**：写清使用频率、现有物品，系统会先判断必要性\n"
+                "- **买哪一个**：写商品名，会去官方开放接口搜真实商品与价格\n"
+                "- **修还是换**：说明现在的故障，会先给维修/换件的路径"
             )
             st.caption(
-                "写商品名时会去官方开放接口搜真实商品（名称、价格、店铺、链接）；"
-                "贴 Steam 链接能直接读到价格与口碑。都没有也能用：需求分析、绿色建议与风险清单照常输出。"
+                "没有商品数据也能用：需求判断、省钱替代路径与风险清单照常输出，"
+                "不会为了凑一个比较而编造价格。"
             )
     else:
         render_wise(_wise)
 
-# ================================================================ ② 自动
+# ================================================================ ② 商品对比
 
-with tab_auto:
+with tab_compare:
+    st.caption(
+        "贴 1–3 个商品链接，逐项对比价格、口碑与参数，再给出分类推荐。"
+        "只支持能自动读取的站点（Steam 已验证；其他站点需页面带标准商品结构化数据）。"
+    )
     with st.form("auto_form"):
         st.markdown("**商品链接**（每行一个，最多 %d 个；支持短链接与跳转）" % MAX_LINKS)
         urls_text = st.text_area(
@@ -596,10 +723,13 @@ with tab_auto:
             auto_discover = st.checkbox("自动发现同类竞品", value=True)
             competitor_count = st.slider("竞品数量", 2, 8, 4, help="会自动从同类商品里按口碑与评价量挑选")
         with c2:
-            budget_low = st.number_input("预算下限（元，可留空）", min_value=0.0, value=0.0, step=10.0)
-            budget_high = st.number_input("预算上限（元，0 表示不限）", min_value=0.0, value=0.0, step=10.0)
+            budget_low = st.number_input(
+                "预算下限（元，可选）", min_value=0, value=None, step=10,
+                placeholder="可不填")
+            budget_high = st.number_input(
+                "预算上限（元，可选）", min_value=0, value=None, step=10,
+                placeholder="可不填")
         with c3:
-            use_cache = st.checkbox("优先使用本地缓存（1 小时内）", value=True)
             cross_platform = st.checkbox(
                 "跨平台查找疑似同款", value=True,
                 help="对京东/淘宝/拼多多商品，在另外两个平台的推广池里按品牌+型号+标题相似度找同款；需要对方平台的密钥",
@@ -613,14 +743,13 @@ with tab_auto:
             w_spec = w3.slider("规格/内容", 0, 100, DEFAULT_WEIGHTS["spec"], 5)
             w_price = w4.slider("价格", 0, 100, DEFAULT_WEIGHTS["price"], 5)
 
+        use_cache = bool(st.session_state["use_cache"])
         allow_llm = False
         if llm_available():
             allow_llm = st.checkbox(
                 "允许把商品数据发送给已配置的外部大模型生成建议（会离开本机）", value=False
             )
             st.caption("提示：你已关闭零成本模式并配置了模型接口，这条路径可能产生费用，请自行确认。")
-        else:
-            st.caption("大模型路径不可用：" + llm_blocked_reason())
         submitted = st.form_submit_button("开始智能比价", type="primary")
 
     if submitted:
@@ -722,13 +851,13 @@ with tab_auto:
             else:
                 st.session_state.advice = None
 
-    # ---------------- 拼多多关键词搜索（官方多多进宝接口） ----------------
+    # ---------------- 按关键词搜一批商品（官方开放接口） ----------------
     # 结果直接写进 session_state.products，因此下面的 ①~⑨ 就是同一套比较与推荐流程。
-    pdd_cred = load_credential("pdd")
-    with st.expander("按关键词搜拼多多商品（官方 pdd.ddk.* 接口 · 需多多进宝密钥）", expanded=False):
+    # 标题与说明按普通用户口径写：接口名、密钥状态这类信息归「使用说明 · 高级设置」。
+    with st.expander("换个方式找商品：按关键词搜一批（可选）", expanded=False):
         st.caption(
-            "走多多进宝商品搜索，口径是**推广池**，不是拼多多全站商品库。"
-            f"当前密钥状态：{pdd_cred.status_text()}。"
+            "想直接比一批同类商品、又没有现成链接时用这里。"
+            "搜的是电商开放平台的**推广池**，不是全站商品库；结果会进下面的比较流程。"
         )
         with st.form("pdd_search_form"):
             c1, c2, c3 = st.columns([2.2, 1, 1])
@@ -739,7 +868,7 @@ with tab_auto:
             d1, d2 = st.columns(2)
             pdd_coupon = d1.checkbox("只看有券商品", value=False)
             pdd_detail = d2.checkbox("读取前 3 条详情（每条 1 次调用）", value=False)
-            pdd_go = st.form_submit_button("搜索拼多多")
+            pdd_go = st.form_submit_button("搜索")
 
         if pdd_go:
             with st.spinner("正在调用拼多多开放平台…"):
@@ -818,12 +947,11 @@ with tab_auto:
         with st.container(border=True):
             st.markdown("**还没有结果。** 可以这样开始：")
             st.markdown(
-                "1. 在下面复制一个真实商品链接（Steam 商店任意游戏页，例如 "
+                "1. 打开 Steam 商店任意游戏页，复制地址（例如 "
                 "`https://store.steampowered.com/app/413150/`）；\n"
-                "2. 粘贴到上面的输入框，点「开始智能比价」；\n"
+                "2. 粘贴到上面的「商品链接」框，点「开始智能比价」；\n"
                 "3. 系统会自动识别商品、找同类竞品、给出五类推荐和购买建议；\n"
-                "4. 也可以展开上方「按关键词搜拼多多商品」，用官方接口按关键词找货"
-                "（需要你自己的多多进宝 client_id / secret / pid）。"
+                "4. 没有链接也能用：展开上面的「换个方式找商品」，按关键词搜一批同类商品。"
             )
 
     if products:
@@ -1113,116 +1241,126 @@ with tab_auto:
                     for link in fallback_links(product, limit=3):
                         st.markdown(f"- [{link['平台']} · {link['说明']}]({link['链接']})")
 
-# ================================================================ ③ 手动
-with tab_manual:
-    st.subheader("手动录入 / 调整 / 自定义权重")
-    st.caption(
-        "这条流程保留自 V0.1：适合自动识别覆盖不到的商城，或你想自己给「实用度」打分。"
-        "与自动流程可以混用。"
-    )
-    col_a, col_b, col_c = st.columns([1, 2, 1])
-    with col_a:
-        if st.button("载入虚构演示数据"):
-            st.session_state.legacy = clean_legacy(pd.DataFrame(demo_rows(), columns=LEGACY_COLUMNS))
-    with col_b:
-        uploaded = st.file_uploader("导入 CSV（列名见下表）", type="csv")
-        if uploaded and st.button("导入 CSV"):
-            try:
-                frame = pd.read_csv(io.BytesIO(uploaded.getvalue()), encoding="utf-8-sig")
-                if "商品" not in frame.columns:
-                    st.error("CSV 必须包含「商品」列")
+    # ---------------- 手动录入（原独立页签，收进本页折叠区） ----------------
+    with st.expander("手动录入与自定义权重（自动识别覆盖不到时用）", expanded=False):
+        st.caption(
+            "保留自 V0.1：适合自动识别覆盖不到的商城，或你想自己给「实用度」打分。"
+            "与上面的自动流程可以混用。"
+        )
+        col_a, col_b, col_c = st.columns([1, 2, 1])
+        with col_a:
+            if st.button("载入虚构演示数据"):
+                st.session_state.legacy = clean_legacy(pd.DataFrame(demo_rows(), columns=LEGACY_COLUMNS))
+        with col_b:
+            uploaded = st.file_uploader("导入 CSV（列名见下表）", type="csv")
+            if uploaded and st.button("导入 CSV"):
+                try:
+                    frame = pd.read_csv(io.BytesIO(uploaded.getvalue()), encoding="utf-8-sig")
+                    if "商品" not in frame.columns:
+                        st.error("CSV 必须包含「商品」列")
+                    else:
+                        st.session_state.legacy = clean_legacy(frame)
+                        st.success("导入完成")
+                except (ValueError, UnicodeDecodeError, pd.errors.ParserError) as exc:
+                    st.error(f"CSV 读取失败：{exc}")
+        with col_c:
+            if st.button("清空手动表"):
+                st.session_state.legacy = pd.DataFrame(columns=LEGACY_COLUMNS)
+            if st.button("把自动结果导入此表"):
+                rows = [p.to_legacy_row() for p in st.session_state.products]
+                if rows:
+                    st.session_state.legacy = clean_legacy(pd.DataFrame(rows, columns=LEGACY_COLUMNS))
+                    st.success(f"已导入 {len(rows)} 个自动识别的商品，可继续手动补实用度")
                 else:
-                    st.session_state.legacy = clean_legacy(frame)
-                    st.success("导入完成")
-            except (ValueError, UnicodeDecodeError, pd.errors.ParserError) as exc:
-                st.error(f"CSV 读取失败：{exc}")
-    with col_c:
-        if st.button("清空手动表"):
-            st.session_state.legacy = pd.DataFrame(columns=LEGACY_COLUMNS)
-        if st.button("把自动结果导入此表"):
-            rows = [p.to_legacy_row() for p in st.session_state.products]
-            if rows:
-                st.session_state.legacy = clean_legacy(pd.DataFrame(rows, columns=LEGACY_COLUMNS))
-                st.success(f"已导入 {len(rows)} 个自动识别的商品，可继续手动补实用度")
-            else:
-                st.warning("还没有自动识别的结果")
+                    st.warning("还没有自动识别的结果")
 
-    with st.expander("手动添加一条（旧版爬虫/补录）", expanded=False):
-        url_in = st.text_input("商品页链接", key="legacy_url")
-        if st.button("尝试抓取这个链接"):
-            try:
-                st.session_state.legacy = clean_legacy(
-                    pd.concat([st.session_state.legacy,
-                               pd.DataFrame([scrape(url_in)], columns=LEGACY_COLUMNS)],
-                              ignore_index=True)
-                )
-                st.success("已抓入表格")
-            except ScrapeError as exc:
-                st.warning(f"抓取失败：{exc}")
-            except Exception as exc:
-                st.error(f"解析异常：{str(exc)[:140]}")
+        with st.expander("手动添加一条（旧版爬虫/补录）", expanded=False):
+            url_in = st.text_input("商品页链接", key="legacy_url")
+            if st.button("尝试抓取这个链接"):
+                try:
+                    st.session_state.legacy = clean_legacy(
+                        pd.concat([st.session_state.legacy,
+                                   pd.DataFrame([scrape(url_in)], columns=LEGACY_COLUMNS)],
+                                  ignore_index=True)
+                    )
+                    st.success("已抓入表格")
+                except ScrapeError as exc:
+                    st.warning(f"抓取失败：{exc}")
+                except Exception as exc:
+                    st.error(f"解析异常：{str(exc)[:140]}")
 
-    edited = st.data_editor(
-        st.session_state.legacy, num_rows="dynamic", hide_index=True,
-        **FIT, key="legacy_editor", disabled=["采集时间"],
-        column_config={
-            "链接": st.column_config.LinkColumn("链接", display_text="打开"),
-            "价格": st.column_config.NumberColumn("价格", min_value=0, format="%.2f"),
-            "评分": st.column_config.NumberColumn("评分", min_value=0),
-            "满分": st.column_config.NumberColumn("满分", min_value=0),
-            "评价数": st.column_config.NumberColumn("评价数", min_value=0, step=1),
-            "好评率%": st.column_config.NumberColumn("好评率%", min_value=0, max_value=100),
-            "实用度(1-10)": st.column_config.NumberColumn("实用度(1-10)", min_value=0, max_value=10),
-        },
-    )
-    st.session_state.legacy = clean_legacy(edited)
+        edited = st.data_editor(
+            st.session_state.legacy, num_rows="dynamic", hide_index=True,
+            **FIT, key="legacy_editor", disabled=["采集时间"],
+            column_config={
+                "链接": st.column_config.LinkColumn("链接", display_text="打开"),
+                "价格": st.column_config.NumberColumn("价格", min_value=0, format="%.2f"),
+                "评分": st.column_config.NumberColumn("评分", min_value=0),
+                "满分": st.column_config.NumberColumn("满分", min_value=0),
+                "评价数": st.column_config.NumberColumn("评价数", min_value=0, step=1),
+                "好评率%": st.column_config.NumberColumn("好评率%", min_value=0, max_value=100),
+                "实用度(1-10)": st.column_config.NumberColumn("实用度(1-10)", min_value=0, max_value=10),
+            },
+        )
+        st.session_state.legacy = clean_legacy(edited)
 
-    st.markdown("**自定义权重**")
-    p1, p2, p3 = st.columns(3)
-    w_price = p1.slider("价格权重", 0, 100, 35, 5, key="legacy_w_price")
-    w_utility = p2.slider("实用度权重", 0, 100, 40, 5, key="legacy_w_utility")
-    w_rep = p3.slider("口碑权重", 0, 100, 25, 5, key="legacy_w_rep")
+        st.markdown("**自定义权重**")
+        p1, p2, p3 = st.columns(3)
+        w_price = p1.slider("价格权重", 0, 100, 35, 5, key="legacy_w_price")
+        w_utility = p2.slider("实用度权重", 0, 100, 40, 5, key="legacy_w_utility")
+        w_rep = p3.slider("口碑权重", 0, 100, 25, 5, key="legacy_w_rep")
 
-    if sum((w_price, w_utility, w_rep)) == 0:
-        st.warning("至少设置一个非零权重")
-    elif st.session_state.legacy.empty:
-        st.info("先抓取/导入/载入演示数据。")
-    else:
-        frame = st.session_state.legacy
-        currencies = sorted(c for c in frame["币种"].unique() if c)
-        if not currencies:
-            st.warning("请先给商品填写币种，例如 CNY、USD。不同币种不能直接比较。")
+        if sum((w_price, w_utility, w_rep)) == 0:
+            st.warning("至少设置一个非零权重")
+        elif st.session_state.legacy.empty:
+            st.info("先抓取/导入/载入演示数据。")
         else:
-            currency = st.selectbox("只比较此币种", currencies)
-            subset = frame[frame["币种"] == currency]
-            if len(currencies) > 1:
-                st.caption("检测到多种货币，已分组；工具不做汇率换算。")
-            result = score_items(subset, (w_price, w_utility, w_rep))
-            view = ["商品", "价格", "币种", "实用度(1-10)", "评分", "满分", "评价数",
-                    "好评率%", "价格分", "实用分", "口碑分", "综合分", "口碑依据", "链接"]
-            st.dataframe(
-                result[view], **FIT, hide_index=True,
-                column_config={"链接": st.column_config.LinkColumn("商品链接", display_text="查看")},
-            )
-            complete = result.dropna(subset=["综合分"])
-            if not complete.empty:
-                best = complete.iloc[0]
-                st.success(
-                    f"手动表综合推荐：{best['商品']}（{best['综合分']:.1f} 分）。"
-                    "分数依赖你填的实用度与口碑，买前请核对实际支付价与售后。"
+            frame = st.session_state.legacy
+            currencies = sorted(c for c in frame["币种"].unique() if c)
+            if not currencies:
+                st.warning("请先给商品填写币种，例如 CNY、USD。不同币种不能直接比较。")
+            else:
+                currency = st.selectbox("只比较此币种", currencies)
+                subset = frame[frame["币种"] == currency]
+                if len(currencies) > 1:
+                    st.caption("检测到多种货币，已分组；工具不做汇率换算。")
+                result = score_items(subset, (w_price, w_utility, w_rep))
+                view = ["商品", "价格", "币种", "实用度(1-10)", "评分", "满分", "评价数",
+                        "好评率%", "价格分", "实用分", "口碑分", "综合分", "口碑依据", "链接"]
+                st.dataframe(
+                    result[view], **FIT, hide_index=True,
+                    column_config={"链接": st.column_config.LinkColumn("商品链接", display_text="查看")},
                 )
-            if len(complete) < len(result):
-                st.warning(
-                    f"有 {len(result) - len(complete)} 件商品缺少必要数据，无法参与综合排名；"
-                    "不会用零或虚构数据填充。"
+                complete = result.dropna(subset=["综合分"])
+                if not complete.empty:
+                    best = complete.iloc[0]
+                    st.success(
+                        f"手动表综合推荐：{best['商品']}（{best['综合分']:.1f} 分）。"
+                        "分数依赖你填的实用度与口碑，买前请核对实际支付价与售后。"
+                    )
+                if len(complete) < len(result):
+                    st.warning(
+                        f"有 {len(result) - len(complete)} 件商品缺少必要数据，无法参与综合排名；"
+                        "不会用零或虚构数据填充。"
+                    )
+                st.download_button(
+                    "下载手动对比结果 CSV", result.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"手动对比_{currency}_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv",
                 )
-            st.download_button(
-                "下载手动对比结果 CSV", result.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"手动对比_{currency}_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv",
-            )
 
-# ================================================================ ④ 说明
+# ================================================================ ③ 说明
 with tab_about:
+    st.subheader("怎么用（30 秒）")
+    st.markdown(
+        "1. 在「购买建议」里写一句话：想买什么、预算多少、用来做什么。**只写商品名也可以。**\n"
+        "2. 点「帮我分析」，先看结论，再看省钱替代路径和下单前要确认的事。\n"
+        "3. 想比价就贴商品链接到「商品对比」，一次最多 3 个。"
+    )
+    st.caption(
+        "这个页面的设计顺序是固定的：**先判断该不该买，再挑选具体商品**。"
+        "所以结论总是出现在商品推荐前面——没有需求支撑的「买哪个更划算」没有意义。"
+    )
+
     st.subheader("能力边界（请务必先看这一节）")
     rows = [
         {"能力": "Steam 商店链接自动识别", "状态": "✅ 真实可用",
@@ -1240,12 +1378,12 @@ with tab_about:
     ]
     st.dataframe(pd.DataFrame(rows), hide_index=True, **FIT)
 
-    st.subheader("已注册的采集适配器")
-    st.dataframe(pd.DataFrame(supported_platforms()), hide_index=True, **FIT)
+    with st.expander("已注册的采集适配器"):
+        st.dataframe(pd.DataFrame(supported_platforms()), hide_index=True, **FIT)
 
-    st.subheader("推荐算法怎么算的")
-    st.markdown(
-        """
+    with st.expander("推荐算法怎么算的"):
+        st.markdown(
+            """
 | 类别 | 公式 | 数据要求 |
 |---|---|---|
 | 性价比最优 | 平滑好评率 × (组内最低价 ÷ 本品价) | 价格 + 好评率 |
@@ -1256,23 +1394,23 @@ with tab_about:
 
 约束：同一类别至少 2 个有效样本，否则**不产出冠军**并说明原因；
 多种货币不换算、只比较数量最多的那一种；缺失字段不补零。
-        """
-    )
+            """
+        )
 
-    st.subheader("合规与隐私")
-    st.markdown(
-        """
+    with st.expander("合规与隐私"):
+        st.markdown(
+            """
 - 只访问公开页面与公开接口；遵守 `robots.txt`；请求之间默认间隔 1.2 秒；不批量抓取。
 - 不绕过登录、验证码、付费墙或风控；遇到 401/403/429 直接停止并如实报错。
 - 数据只存在本机 SQLite（`data/betterbuy.sqlite3`），不上传任何服务器，不建立账号体系。
 - 大模型为**可选**能力：只有你勾选同意、且本机配置了接口时才会把商品事实发出去，不包含个人信息。
 - 不得用本工具做绕过平台规则的价格爬取；采集结果仅供个人比价参考。
-        """
-    )
+            """
+        )
 
-    st.subheader("已知限制")
-    st.markdown(
-        """
+    with st.expander("已知限制（17 条，买前值得扫一眼）"):
+        st.markdown(
+            """
 1. 京东/淘宝天猫/拼多多走**官方开放接口**，密钥由服务端统一配置，普通用户不需要自己申请。
    密钥未就绪时这三个平台只能识别链接、不能采集商品（不会退回抓页面，也不会编价格）。
 2. 三家都是「推广/联盟」口径，只有进入推广池的商品查得到；不是全站商品库。
@@ -1283,7 +1421,8 @@ with tab_about:
 6. Steam 好评率使用页面提供的**语言维度**汇总口径，与全语言总数可能不同，界面已标注。
 7. 价格是采集时刻的公开标价，不含运费、税费与券后价。
 8. 未做真实用户访谈，推荐权重基于常识设定，可自行调整。
-9. 为保证零成本，每个数据源都有**每日请求上限**，超限当天直接停止外部请求（页面顶部会显示今日已用次数）。
+9. 为保证零成本，每个数据源都有**每日请求上限**，超限当天直接停止外部请求
+   （可在下方「高级设置」里查看今日已用次数）。
 10. 免费部署（Streamlit Cloud）的文件系统非持久，重启后本地缓存与价格历史会丢失。
 11. 理性消费分析用的是**规则引擎**（关键词 + 判定表 + 阈值），不是大模型。
     它能识别品类、预算、用途、频率与风险信号，但不懂真正的语义
@@ -1294,12 +1433,69 @@ with tab_about:
 15. 判定阈值（风险累计 5 分建议暂缓、3 分建议比较）基于常识设定，**没有用真实用户行为校准过**。
 16. 兼容性只能提醒你确认，不能替你判定。因为拿不到你的设备型号，任何「兼容/不兼容」的结论都是猜的。
 17. 大模型增强在零成本模式下**默认禁用**，推荐与建议全部由本地规则算法生成。
-        """
-    )
+            """
+        )
 
-    st.caption(
-        f"BetterBuy 智选 · 公益版 · 生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
-        "数据来源与更新时间在每个商品卡片下方列出。本页所有结论均由规则引擎产生，未调用大模型。"
+    # ------------------------------------------------ 高级设置（原顶部状态条与配置入口）
+    st.subheader("高级设置")
+    st.caption("普通用户不用看这一节。这里只放运行状态、数据源接入与请求偏好。")
+    with st.expander("运行状态 · 平台接入 · 缓存 · 请求额度", expanded=False):
+        st.markdown("**运行状态**")
+        st.markdown(
+            f"- 分析方式：{RATION_MODE_LABEL}\n"
+            f"- 零成本模式：{'开启（禁止调用任何大模型）' if _usage['zero_cost'] else '已关闭（可能产生费用）'}\n"
+            f"- 今日外部请求：{_usage['used']} / {_usage['limit']} 次（剩余 {_usage['remaining']}）\n"
+            f"- 大模型调用：{'禁止' if _usage['zero_cost'] else '允许'}"
+        )
+        if public_demo():
+            st.markdown(
+                f"- 公网演示模式：开启（电商各 {daily_limit('pdd')} 次/日、合计 {_usage['limit']} 次/日）"
+            )
+        if _usage["blocked_sources"]:
+            st.warning("已达上限的数据源：" + "、".join(_usage["blocked_sources"]))
+        st.caption(
+            "额度用尽后相关请求会被直接拦下，不会产生费用。"
+            "这些上限是本项目自设的保守值，不是平台官方额度。"
+        )
+
+        st.markdown("**分析偏好**")
+        st.selectbox(
+            "商品品类（自动识别不准时手动改）",
+            ["自动识别"] + all_names(),
+            key="wise_category",
+            help="改了会在结果里说明「品类按你的选择来」，不会假装是自动识别的",
+        )
+        st.checkbox(
+            "顺带找同类商品（目前只对 Steam 有效）", key="wise_discover",
+            help="其他平台不会假装能找到同类",
+        )
+        st.checkbox(
+            "使用本地缓存（1 小时内不重复请求）", key="use_cache",
+            help="关掉后每次都重新请求，结论更实时，但会更快用完每日额度",
+        )
+
+        st.markdown("**电商平台接入状态**")
+        for _key, _label in (("jd", "京东"), ("taobao", "淘宝/天猫"), ("pdd", "拼多多")):
+            st.markdown(f"- **{_label}**：{load_credential(_key).status_text()}")
+        st.caption(
+            "密钥只从服务端环境变量或 Streamlit Secrets 读取，页面上不显示、也没有输入框——"
+            "普通用户不需要、也不应该自己配 API。"
+        )
+
+    # ------------------------------------------------ 页脚
+    st.markdown("---")
+    st.markdown(
+        f"**{PROJECT_NAME}**　先问该不该买，再问买哪一个。"
     )
-    st.caption(f"正式站点：{OFFICIAL_URL} · 代码仓库：{GITHUB_URL}（欢迎提交问题与改进）")
+    st.caption(
+        "面向大学生的理性消费与绿色消费助手 · 公益版 · "
+        "AI青年行·2026高校好事计划 参赛作品"
+    )
+    st.caption(
+        f"正式站点：{OFFICIAL_URL} · 代码仓库：{GITHUB_URL}（欢迎提交问题与改进）"
+    )
+    st.caption(
+        f"本页所有结论均由规则引擎产生，未调用大模型 · 内容更新于 "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
 

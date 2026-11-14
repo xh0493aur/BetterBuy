@@ -236,7 +236,10 @@ def run(
                     for candidate in discovery.candidates:
                         if len(result.products) >= max_links + 3:
                             break
-                        if any(p.product_id == candidate.product_id for p in result.products):
+                        # Candidate 只有 appid，没有 product_id；这里要自己拼成统一的 id，
+                        # 否则去重会抛 AttributeError，整段竞品搜索被外层 except 吞掉。
+                        candidate_id = f"steam:{candidate.appid}"
+                        if any(p.product_id == candidate_id for p in result.products):
                             continue
                         try:
                             found = collect_fn(candidate.url, use_cache=use_cache)

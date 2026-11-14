@@ -150,6 +150,41 @@ class RunTests(unittest.TestCase):
             discover_fn=fake_discover)
         self.assertEqual(calls["discover"], 0)
 
+    def test_discovery_candidates_are_deduped_by_appid(self):
+        """回归：``Candidate`` 只有 ``appid``，去重时拿 ``product_id`` 会抛 AttributeError，
+        整段竞品采集被外层 except 吞掉——表现是「Steam 自动发现同类商品从来不出结果」。
+        """
+        from betterbuy.discovery.steam_search import Candidate
+
+        candidate = Candidate(
+            appid=105600, name="Terraria", price=42.0, currency="CNY",
+            positive_rate=98.0, review_count=171099, label="好评如潮",
+            image="", url="https://store.steampowered.com/app/105600/",
+        )
+
+        class Result:
+            ok = True
+            candidates = [candidate]
+            note = "测试用"
+
+        collected: list[str] = []
+
+        def fake_collect(url, use_cache=True, ttl=None):
+            if url.endswith("413150/"):
+                return fake_product()
+            collected.append(url)
+            return Product(product_id="steam:105600", platform="Steam", url=url,
+                           name="Terraria", offer=Offer(price=42.0, currency="CNY"),
+                           rating=Rating(positive_rate=98, review_count=171099))
+
+        result = run("https://store.steampowered.com/app/413150/",
+                     collect_fn=fake_collect, discover_fn=lambda product, **kw: Result())
+
+        self.assertIn("https://store.steampowered.com/app/105600/", collected)
+        self.assertTrue(any(p.product_id == "steam:105600" for p in result.products))
+        self.assertFalse(any("竞品搜索未能完成" in note for note in result.notes),
+                         f"竞品采集被异常中断：{result.notes}")
+
     def test_empty_query_is_safe(self):
         result = run("", collect_fn=FakeCollector())
         self.assertEqual(result.products, [])
