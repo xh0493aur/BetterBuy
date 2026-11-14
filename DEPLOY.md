@@ -119,6 +119,10 @@ git push -u origin main
 
 覆盖之后记得去 Streamlit 改 Main file path（见第六节第一条注）。
 
+> 本仓库在迁移时把旧的网页上传快照保留在了分支 `backup-web-upload` 上，
+> 需要对比或找回时 `git fetch origin backup-web-upload` 即可，确认没用可以删。
+> 想让别人也看到旧版历史的话，就别用 `-f`，改用做法二。
+
 ---
 
 ## 五之二、仓库要公开怎么办
