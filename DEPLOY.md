@@ -341,3 +341,20 @@ git switch main && git merge ui/simplify && git push
    上传后到 Actions/部署日志确认构建成功。
 
 无论哪种方式，**推完都要确认 Streamlit 的 Main file path 仍是 `app.py`**（第六节第一条注）。
+
+### 当前分支状态（2026-11-15 02:20）
+
+| 位置 | 内容 | 线上效果 |
+|---|---|---|
+| `origin/main`（`1d8db9e`） | 旧版：7 个页签、顶部状态条 | **线上正在跑这一版** |
+| `origin/ui/simplify-4-tabs`（`b02c9dd`） | 新版：3 个页签（购买建议 / 商品对比 / 使用说明），首屏改版，修复竞品发现 | 未上线 |
+
+合并上线只需两步（不会重建应用、不会改 URL）：
+
+```bash
+git switch main && git merge ui/simplify-4-tabs && git push
+```
+
+推完 Streamlit 自动重新构建，**网址不变**（`https://betterbuy-ewtcn8eechfdqdrr2zymch.streamlit.app/`），
+也不需要动 Settings 里的 Main file path（仍是仓库根目录的 `app.py`）。
+
