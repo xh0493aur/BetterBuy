@@ -99,6 +99,26 @@ git push -u origin main
 `git status` 里应该只有 `app.py`、`betterbuy/`、`tests/`、`scripts/`、`docs/`、
 `requirements.txt`、`README.md`、`DEPLOY.md`、`.gitignore`、`.streamlit/config.toml`、3 张截图。
 
+### 远程已经有"网页上传"的旧内容怎么办
+
+如果仓库里之前用网页上传过一份旧的 `betterbuy_deploy/` 目录，它和本地**没有共同祖先**，
+普通 `git push` 会被拒绝（`non-fast-forward` / `unrelated histories`）。两种处理：
+
+```bash
+# 做法一（推荐）：直接用本仓库覆盖远程 main，旧快照不再保留
+git push -f -u origin main
+
+# 做法二：保留旧历史，先合并再推（会多一个 merge commit，目录会并存）
+git fetch origin
+git merge --allow-unrelated-histories origin/main
+git rm -r --cached betterbuy_deploy    # 只从索引移除旧目录
+rm -rf betterbuy_deploy
+git commit -m "迁移到根目录布局"
+git push -u origin main
+```
+
+覆盖之后记得去 Streamlit 改 Main file path（见第六节第一条注）。
+
 ---
 
 ## 五之二、仓库要公开怎么办
@@ -161,12 +181,17 @@ python scripts/scan_secrets.py --tracked --history
 
 ## 六、Streamlit Community Cloud 部署
 
-1. 打开 https://share.streamlit.io ，用 GitHub 登录并授权这个私有仓库。
+1. 打开 https://share.streamlit.io ，用 GitHub 登录并授权这个仓库。
 2. **New app** → 选仓库和分支 `main` → Main file path 填 `app.py`。
 3. **Advanced settings** 里 Python 版本选 **3.11** 或 **3.12**（本地验证用的是 3.12）。
 4. 不填 Secrets 也能直接 Deploy：零成本模式下所有电商适配器会明确显示"未配置凭据"，
    Steam 比价、理性消费分析、绿色建议、风险提示全部可用。
 5. 首次构建约 2–5 分钟，日志里出现 `You can now view your Streamlit app` 即成功。
+
+> **已经部署过旧版的话，必须改这一项**：进入 app → 右上 ⋮ → Settings → Main file path。
+> 旧结构是 `betterbuy_deploy/app.py`（代码在子目录里），现在代码在**仓库根**，
+> 要改成 `app.py`。不改的话：要么启动报 `app.py not found`，要么一直在跑旧代码。
+> 改完保存，应用会自动重新构建。
 
 ### 以后要接京东/淘宝/拼多多的密钥
 
