@@ -20,7 +20,7 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 import betterbuy.adapters as adapters_mod  # noqa: E402
 import betterbuy.cache as cache_mod  # noqa: E402
 from betterbuy.adapters.steam import product_from_appdetails  # noqa: E402
-from betterbuy.models import Offer, Rating, Source  # noqa: E402
+from betterbuy.models import Offer, Product, Rating, Source  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -104,7 +104,7 @@ class SmokeTests(unittest.TestCase):
     def test_initial_page_has_no_error(self):
         at = self._run()
         self.assertEqual(list(at.exception), [])
-        self.assertEqual(len(at.tabs), 7)
+        self.assertEqual(len(at.tabs), 4)
         self.assertTrue(any("BetterBuy" in t.value for t in at.title))
         # 没有结果时要给出可操作的引导，而不是空白
         self.assertTrue(any("还没有分析结果" in md.value for md in at.markdown))
@@ -141,26 +141,26 @@ class SmokeTests(unittest.TestCase):
         # 没有商品数据时必须说清楚，而不是编一个价格
         self.assertTrue(any("笔记本" in m for m in joined.split("，")))
 
-    def test_zero_cost_tab_is_present(self):
+    def test_only_four_tabs_and_config_pages_are_hidden(self):
+        """精简后的页面只保留 4 个标签页；配置类页面不再对普通用户露出。"""
         at = self._run()
         self.assertEqual(list(at.exception), [])
+        labels = [t.label for t in at.tabs]
+        self.assertEqual(len(labels), 4)
+        for expected in ("① 智选", "② 自动识别", "③ 手动录入", "④ 说明与限制"):
+            self.assertTrue(any(lbl.startswith(expected) for lbl in labels), f"缺少 {expected}：{labels}")
         headers = [s.value for s in at.subheader]
-        self.assertIn("零成本运行状态", headers)
-        self.assertIn("① 每日调用配额", headers)
-        self.assertIn("④ 免费部署方案", headers)
-        # 零成本模式必须默认开启，并且页面明确说大模型是禁止的
-        metrics = {m.label: m.value for m in at.metric}
-        self.assertEqual(metrics.get("大模型调用"), "禁止")
-        self.assertTrue(any("零成本模式已开启" in s.value for s in at.success))
+        for hidden in ("本地数据库与采集记录", "电商开放平台接入状态", "零成本运行状态"):
+            self.assertNotIn(hidden, headers, f"{hidden} 应该已经隐藏")
 
-    def test_ecommerce_tab_is_present(self):
+    def test_protections_still_active_after_simplification(self):
+        """页面入口删了，但零成本与配额保护必须还在。"""
         at = self._run()
         self.assertEqual(list(at.exception), [])
-        headers = [s.value for s in at.subheader]
-        self.assertIn("电商开放平台接入状态", headers)
-        self.assertIn("② 每个字段到底能不能拿到", headers)
-        # 未配置密钥时必须明确说出来，不能假装能采
-        self.assertTrue(any("还没有配置" in w.value for w in at.warning))
+        caps = " ".join(c.value for c in at.caption)
+        self.assertIn("零成本模式：开启", caps)
+        self.assertIn("今日外部请求", caps)
+        self.assertIn("大模型调用：禁止", caps)
 
     def test_full_flow_renders_all_sections(self):
         at = self._run(self.urls)
@@ -216,6 +216,92 @@ class SmokeTests(unittest.TestCase):
         # 页面顶部横幅也要反映零成本状态
         captions = " ".join(c.value for c in at.caption)
         self.assertIn("零成本模式", captions)
+
+
+class WiseNameSearchTests(unittest.TestCase):
+    """只输入商品名时，也要拿到真实商品，而不是只给建议。
+
+    这里把搜索函数换成假实现，验证的是**界面与编排层的接线**：
+    1. 没贴链接 → 一定走搜索，并且搜索用的关键词是从输入里提炼的；
+    2. 搜索成功 → 商品进入 ① 卡片、② 价格比较、③ 建议；
+    3. 搜索失败（未配置密钥等）→ 如实说明，不编价格，其余区块照常输出。
+    """
+
+    def _open(self):
+        at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=120)
+        at.run()
+        return at
+
+    def _submit(self, at, text):
+        area = next(t for t in at.text_area if t.label == "商品链接或购买需求")
+        area.set_value(text)
+        next(b for b in at.button if b.label == "开始智能分析").click()
+        return at
+
+    def _fake_products(self):
+        first = Product(product_id="pdd:1", platform="拼多多", url="",
+                        name="机械键盘 87 键 有线版")
+        first.offer = Offer(price=199.0, currency="CNY", source_key="pdd")
+        first.specs = {"店铺": "某数码旗舰店", "已售": "1 万+"}
+        first.status = "拼多多关键词搜索结果"
+        second = Product(product_id="pdd:2", platform="拼多多", url="",
+                         name="机械键盘 87 键 无线版")
+        second.offer = Offer(price=359.0, currency="CNY", source_key="pdd")
+        second.specs = {"店铺": "另一家旗舰店", "已售": "3000+"}
+        second.status = "拼多多关键词搜索结果"
+        for product in (first, second):
+            product.origin = "search"
+            product.recompute_missing()
+        return [first, second]
+
+    def _result(self, ok=True, kind="", products=None):
+        from betterbuy.pdd_search import SearchResult
+
+        return SearchResult(
+            ok=ok, keyword="机械键盘", kind=kind, products=products or [],
+            message="搜到 2 件商品" if ok else "拼多多接口未配置密钥",
+            used_api="pdd.ddk.goods.search", api_calls=1 if ok else 0,
+        )
+
+    def test_name_only_input_searches_and_renders_real_products(self):
+        at = self._open()
+        self._submit(at, "机械键盘 87 键")
+        with mock.patch("betterbuy.pdd_search.search",
+                        return_value=self._result(products=self._fake_products())):
+            at.run()
+        self.assertEqual(list(at.exception), [])
+        caps = " ".join(c.value for c in at.caption)
+        self.assertIn("搜索关键词：「机械键盘」", caps)
+        self.assertIn("真实商品", caps)
+        headers = [s.value for s in at.subheader]
+        self.assertIn("① 商品信息与可用数据", headers)
+        self.assertIn("② 价格与实用度比较", headers)
+        # 两件商品都有价格 → 应该出现比较表，而不是"没有可比价格"
+        self.assertGreaterEqual(len(at.dataframe), 1)
+
+    def test_search_failure_is_explained_without_fake_price(self):
+        at = self._open()
+        self._submit(at, "机械键盘 87 键")
+        with mock.patch("betterbuy.pdd_search.search",
+                        return_value=self._result(ok=False, kind="no_credential")):
+            at.run()
+        self.assertEqual(list(at.exception), [])
+        caps = " ".join(c.value for c in at.caption)
+        self.assertIn("没有取到商品数据", caps)
+        self.assertIn("不用估算值顶替", caps)
+        # 没数据也必须继续给出绿色建议与风险清单
+        headers = [s.value for s in at.subheader]
+        self.assertIn("④ 还有更环保、更省钱的选择吗？", headers)
+        self.assertIn("⑤ 购买风险提醒", headers)
+
+    def test_links_take_priority_over_search(self):
+        """贴了链接就不该再去打搜索接口（省一次配额，也避免答非所问）。"""
+        at = self._open()
+        self._submit(at, "https://store.steampowered.com/app/413150/")
+        with mock.patch("betterbuy.pdd_search.search") as spy, \
+                mock.patch("betterbuy.adapters.collect", side_effect=RuntimeError("测试中不联网")):
+            at.run()
+        self.assertFalse(spy.called, "贴了链接却仍然调用了关键词搜索")
 
 
 if __name__ == "__main__":

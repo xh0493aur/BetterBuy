@@ -11,6 +11,27 @@
 
 ---
 
+## 〇、正式地址（唯一入口，改之前先看这一节）
+
+| 项 | 值 |
+| --- | --- |
+| 正式官网 | https://betterbuy-ewtcn8eechfdqdrr2zymch.streamlit.app/ |
+| 代码仓库 | https://github.com/xh0493aur/BetterBuy |
+| 分支 | `main` |
+| Main file path | `app.py`（仓库根目录布局） |
+| 代码里的唯一来源 | `betterbuy/site.py` 的 `OFFICIAL_URL` |
+
+规则（这几条不要破）：
+
+1. 线上应用就是这个，**不删、不重建、不改 URL、不另建一个"正式"实例**。
+   换域名 = 换官网，必须项目负责人确认后同时改 `betterbuy/site.py` 与本文档。
+2. 更新代码只走 `main` 分支的正常提交，**不用 `git push -f`**，不覆盖远程历史。
+3. 推送前先看第六节：Main file path 必须是 `app.py`，写错线上会直接起不来。
+4. `tests/test_public_safety.py::SiteIdentityTests` 会校验本文档与 `site.py` 里的地址一致，
+   写错或另起一个地址，测试会先红。
+
+---
+
 ## 一、部署前那三处改动（历史记录）
 
 | 文件 | 改动 | 为什么 |
@@ -217,20 +238,24 @@ BETTERBUY_PDD_CLIENT_SECRET = "..."
 BETTERBUY_PDD_PID = "1234567_98765432"
 ```
 
-保存后应用会自动重启，`secrets_bridge.py` 把它们注入环境变量，
-"⑤ 电商平台接入"标签页里对应平台就会从"未配置"变成"已配置"。
+保存后应用会自动重启，`secrets_bridge.py` 把它们注入环境变量。配置是否生效有两个地方可看：
+在「① 智选」里输入一个商品名提交，搜到商品就说明通了；没通时页面会直接告诉你卡在哪一类
+（未配置 / 凭证 / 权限 / 备案 / 限流）。
 
-> 注意：免费额度按平台账号算，与部署在哪台机器无关。这些密钥是你个人账号的，
-> 不要把仓库改成公开，也不要贴进截图。
+> 注意：免费额度按平台账号算，与部署在哪台机器无关。密钥只存在 Secrets 里，
+> 仓库里只有一个值全为空的模板，所以仓库公开也不会泄露凭据。
+> 不要把密钥贴进截图、Issue 或聊天记录。
 
 ### 拼多多接入的四个要点
 
 1. **三个值都得有**：`CLIENT_ID`、`CLIENT_SECRET`、`PID`。缺 `PID` 时客户端会直接判定"未配置"，
    不会发出任何请求（也就不会花额度）。
-2. **PID 必须做授权备案**，否则关键词搜索返回 `50001 / sub_code 60001`。
-   做法：在多多进宝用转链接口生成一次带 `generate_authority_url` 的链接并访问一次。
-   如果备案时带了 `custom_parameters`，也要把同一份 JSON 配到
-   `BETTERBUY_PDD_CUSTOM_PARAMETERS`，否则依然对不上。
+2. **PID 必须做授权备案**，否则关键词搜索返回 `50001 / sub_code 60001`（本项目线上实测就是这个）。
+   按四步处理：① 用与 `client_id` **同一个账号**登录 jinbao.pinduoduo.com；
+   ② 推广位管理里确认这个 pid 存在、状态正常（形如 `1234567_98765432`）；
+   ③ 用该 pid 生成一条推广链接，并在浏览器里打开一次；
+   ④ 如果 Secrets 里配了 `BETTERBUY_PDD_CUSTOM_PARAMETERS`，必须与备案时用的完全一致，
+   拿不准就先清空它再试。
 3. **云端的出口 IP 不固定**，所以不要给应用开 IP 白名单（开了就会报 20005）。
 4. **验证顺序**：先本地 `python scripts/check_pdd.py`（离线，只查配置），
    再 `python scripts/check_pdd.py --live`（真调一次搜索），最后 `--live --detail --link`。
@@ -238,6 +263,28 @@ BETTERBUY_PDD_PID = "1234567_98765432"
 
 没有密钥时页面也不会崩：搜索面板会明确显示"未配置密钥：缺少 XXX"，
 Steam 比价、理性消费分析等其余功能完全不受影响。
+
+### 2026-11-15 线上实测记录（对照用）
+
+在正式站点上真实点击「搜索拼多多」，关键词 `机械键盘 87 键`，接口
+`pdd.ddk.goods.search` 的真实返回：
+
+```
+需要先做授权备案：拼多多接口报错：业务服务错误：未传入已经授权备案过的相关参数(pid/custom_parameters)
+（code=50001，sub_code=60001）
+```
+
+这条错误信息的含义要说准：
+
+| 已验证通过 | 尚未通过 |
+| --- | --- |
+| `client_id` / `client_secret` 存在且有效（否则报 10016 / 20004） | 推广位（pid）的授权备案 |
+| 请求签名、时间戳、参数位正确 | — |
+| 应用已有 `pdd.ddk.goods.search` 接口权限（否则报 20031 / 30000） | — |
+| 出口 IP 未被拦（否则报 20005） | — |
+
+也就是说：**代码这一侧是通的，卡在账号侧的备案**。按上面第 2 点的四步做完，
+再点一次搜索就会出现真实商品表格。
 
 ---
 
@@ -250,7 +297,7 @@ Steam 比价、理性消费分析等其余功能完全不受影响。
 | 京东/淘宝/拼多多商品页抓取可能失败 | 云服务器 IP 段被电商风控拦截（返回 403/验证页） | 这是平台策略，代码不绕过；页面会显示"访问受限"并给出官方跳转链接 |
 | 每日请求上限按 UTC 自然日重置 | `betterbuy/zero_cost.py` 按日期分桶计数 | 超限后当天不再发外部请求，页面会提示，不会产生费用 |
 
-以上都在应用内的"零成本与配额""说明与限制"两个标签页里有对应说明，不是隐藏行为。
+以上都在应用内的"④ 说明与限制"标签页和页面顶部横幅里有对应说明，不是隐藏行为。
 
 ---
 
@@ -260,9 +307,37 @@ Steam 比价、理性消费分析等其余功能完全不受影响。
 
 ```bash
 cd BetterBuy
-# 从原项目同步改动（示例：只同步业务模块）
-cp ../product_compare_project/betterbuy/*.py betterbuy/
-git add -A && git commit -m "同步改动" && git push
+git add -A && git commit -m "说明这次改了什么"
+git push          # 不要用 -f：这里没有"必须覆盖历史"的场景
 ```
 
-Streamlit Cloud 会自动重新部署。`app.py` 里那 3 行桥接记得保留，否则云端密钥失效。
+Streamlit Cloud 检测到 `main` 有新提交会自动重新部署（2–5 分钟）。`app.py` 里那 3 行桥接记得保留，
+否则云端密钥失效。
+
+### 想先验证、不想动线上时
+
+把改动推到**分支**，`main` 不动，线上就不会变：
+
+```bash
+git switch -c ui/simplify      # 新建分支
+git push -u origin ui/simplify # 只为备份与评审，不触发重新部署
+# 本地或预览环境确认没问题后，再合并：
+git switch main && git merge ui/simplify && git push
+```
+
+### 如果 `git push` 报 502（CONNECT tunnel failed）
+
+现象：`fatal: unable to access 'https://github.com/...': CONNECT tunnel failed, response 502`，
+但 `curl https://api.github.com/rate_limit` 却是 200。这是本机代理只放行了 `api.github.com`，
+不是仓库或凭据的问题。三种安全做法，任选一种，**都不需要 `-f`**：
+
+1. **换个网络重推**（手机热点最快）：`git push` 即可，同一个提交，不需要任何额外参数。
+2. **走 SSH**：`git remote set-url origin git@github.com:xh0493aur/BetterBuy.git`，
+   前提是本机已有可用的 SSH key（`ssh -T git@github.com` 能返回 200）。
+3. **网页手动更新**（代理最严时用）：GitHub 仓库 → `Add file` → `Upload files`，
+   把改过的文件拖进去 → Commit。这次改动只涉及 6 个文件
+   （`app.py`、`betterbuy/wise.py`、`betterbuy/pdd_search.py`、`betterbuy/site.py`、
+   `DEPLOY.md`、`tests/` 下三个测试文件），逐个替换即可，**不要删任何文件**。
+   上传后到 Actions/部署日志确认构建成功。
+
+无论哪种方式，**推完都要确认 Streamlit 的 Main file path 仍是 `app.py`**（第六节第一条注）。

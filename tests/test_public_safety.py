@@ -155,5 +155,44 @@ class GateUiTests(unittest.TestCase):
             self.assertNotIn("访问口令", [w.label for w in at.text_input])
 
 
+class SiteIdentityTests(unittest.TestCase):
+    """正式地址只允许有一个来源：betterbuy/site.py。
+
+    这些断言是"防手滑"用的：谁把网址改错、或者在文档里另写一个地址，测试会先红。
+    """
+
+    def test_official_url_is_the_cloud_app(self):
+        from betterbuy.site import OFFICIAL_URL
+
+        self.assertTrue(OFFICIAL_URL.startswith("https://"))
+        self.assertIn("betterbuy-ewtcn8eechfdqdrr2zymch.streamlit.app", OFFICIAL_URL)
+        self.assertTrue(OFFICIAL_URL.endswith("/"))
+
+    def test_repo_and_main_file_unchanged(self):
+        from betterbuy.site import GITHUB_REPO, GITHUB_URL, MAIN_FILE
+
+        self.assertEqual(GITHUB_REPO, "xh0493aur/BetterBuy")
+        self.assertEqual(GITHUB_URL, "https://github.com/xh0493aur/BetterBuy")
+        self.assertEqual(MAIN_FILE, "app.py")
+
+    def test_docs_quote_the_same_url(self):
+        """部署文档里必须写同一个地址，不能各写各的。"""
+        import pathlib
+
+        from betterbuy.site import OFFICIAL_URL
+
+        root = pathlib.Path(APP).parent
+        deploy = (root / "DEPLOY.md").read_text(encoding="utf-8")
+        self.assertIn(OFFICIAL_URL, deploy)
+        # 除了这个地址，不应再出现别的 streamlit.app 域名
+        others = {
+            token.strip("()（）[]<>`\"'，。、")
+            for token in deploy.replace("\n", " ").split(" ")
+            if "streamlit.app" in token
+        }
+        others = {u for u in others if u.startswith("http") or u.startswith("www")}
+        self.assertEqual(others - {OFFICIAL_URL}, set(), f"文档里出现了其他站点地址：{others}")
+
+
 if __name__ == "__main__":
     unittest.main()

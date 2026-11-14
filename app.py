@@ -2,14 +2,15 @@
 
 运行：streamlit run app.py
 
-页面结构：
-    ① 智选 · 理性消费分析（公益版核心：链接/商品名/需求三种输入 → 三档结论 + 绿色建议 + 风险提示）
-    ② 自动识别与智能比价（V0.2–V0.5 的比价与推荐能力）
-    ③ 手动录入与自定义权重（保留旧版本的对比与评分能力）
-    ④ 数据与缓存（SQLite 状态、价格历史、采集日志）
-    ⑤ 电商平台接入（京东/淘宝/拼多多 官方接口状态与字段矩阵）
-    ⑥ 零成本与配额（调用上限、成本清单、免费部署）
-    ⑦ 说明与限制（能力边界，避免误以为"全平台全自动"）
+页面结构（面向普通用户，只保留 4 个标签页）：
+    ① 智选 · 理性消费分析（默认首屏：商品名/需求/链接 → 真实商品 + 三档结论 + 绿色建议 + 风险提示）
+    ② 自动识别与智能比价（链接比价与推荐能力）
+    ③ 手动录入与自定义权重（旧版本的对比与评分能力）
+    ④ 说明与限制（能力边界，避免误以为"全平台全自动"）
+
+注意：缓存、平台适配器、密钥管理、每日请求上限这些逻辑**仍然全部保留**在后端
+（betterbuy/cache.py、betterbuy/adapters/、betterbuy/openapi/、betterbuy/zero_cost.py），
+只是不再在前台提供配置入口——普通用户不需要、也不应该自己配 API。
 """
 from __future__ import annotations
 
@@ -21,7 +22,6 @@ import streamlit as st
 
 from betterbuy.adapters import collect, supported_platforms
 from betterbuy.advisor import llm_advice, llm_available, llm_blocked_reason, rule_advice
-from betterbuy.cache import db
 from betterbuy.catalog import PRICE_BAND_NOTE, all_names, key_of_name
 from betterbuy.discovery import discover
 from betterbuy.discovery.ecommerce import same_product_across
@@ -31,21 +31,16 @@ from betterbuy.access import SESSION_KEY as ACCESS_SESSION_KEY
 from betterbuy.access import configured as access_configured
 from betterbuy.access import verify as access_verify
 from betterbuy.http_client import FetchError
-from betterbuy.linkdetect import detect
 from betterbuy.models import UNKNOWN, Product
-from betterbuy.openapi import (FIELD_MATRIX, PLATFORMS, credential_rows, describe,
-                               permission_checklist)
 from betterbuy.openapi import load as load_credential
-from betterbuy.openapi.pdd import ERROR_CODE_TABLE
 from betterbuy.pdd_search import attach_links as attach_pdd_links
 from betterbuy.pdd_search import search as pdd_keyword_search
 from betterbuy.ration import MODE_LABEL as RATION_MODE_LABEL
 from betterbuy.recommend import DEFAULT_WEIGHTS, PICK_ORDER, PICK_TITLES, recommend
 from betterbuy.risk import LEVEL_HIGH, LEVEL_OK, LEVEL_TODO
+from betterbuy.site import GITHUB_URL, OFFICIAL_URL
 from betterbuy.wise import MAX_LINKS_PER_ANALYSIS, run as run_wise
-from betterbuy.zero_cost import (COST_ITEMS, FREE_DEPLOY, SHOW_POLICY, daily_limit,
-                                 public_demo, quota, quota_rows, usage_summary,
-                                 zero_cost_mode)
+from betterbuy.zero_cost import daily_limit, public_demo, usage_summary
 from scoring import score_items
 from scraper import ScrapeError, scrape
 
@@ -164,7 +159,7 @@ def _render_product_block(product: Product) -> None:
             if product.image_url:
                 st.image(product.image_url, **FIT)
         with right:
-            tag = {"discovered": "自动发现的同类", "search": "拼多多关键词搜索"}.get(
+            tag = {"discovered": "自动发现的同类", "search": "关键词搜索到的商品"}.get(
                 product.origin, "你提供的")
             st.markdown(f"**{product.name or UNKNOWN}**　`{tag}`")
             meta = [product.platform, product.brand, product.model]
@@ -178,8 +173,11 @@ def _render_product_block(product: Product) -> None:
             st.caption("口碑：" + product.rating.display())
             if product.missing:
                 st.caption("缺失字段（不填默认值）：" + "、".join(product.missing))
+            stamp = f"采集时间 {product.fetched_at}" if product.fetched_at else "采集时间未记录"
             if product.url:
-                st.markdown(f"[打开商品页]({product.url}) · 采集时间 {product.fetched_at}")
+                st.markdown(f"[打开商品页]({product.url}) · {stamp}")
+            else:
+                st.caption(f"商品链接：接口未返回（不拼接猜测链接） · {stamp}")
 
 
 def render_wise(w) -> None:
@@ -202,13 +200,27 @@ def render_wise(w) -> None:
     # ---------------- ① 商品信息 ----------------
     st.markdown("---")
     st.subheader("① 商品信息与可用数据")
+    if w.searched_keyword:
+        st.caption(f"本次用的搜索关键词：「{w.searched_keyword}」（来自你输入里的商品名/品类词）")
     if not w.products:
         st.warning("本次没有采集到商品数据，所以下面不会出现任何价格、评分或商品卡片。")
-        st.caption(
-            "没有链接也可以只用需求分析——②之后的绿色建议与风险清单不依赖商品数据。"
-            if not w.urls else
-            "链接采集失败的原因见上方提示。本项目不会用示例数据填补空缺。"
-        )
+        if w.urls:
+            st.caption("链接采集失败的原因见上方提示。本项目不会用示例数据填补空缺。")
+        elif w.search_kind == "no_credential":
+            st.caption(
+                "服务端还没有可用的电商接口密钥，所以这次只能做需求分析。"
+                "换成 Steam 商品链接可以直接读到价格与口碑；绿色建议与风险清单不依赖商品数据。"
+            )
+        elif w.searched_keyword:
+            st.caption(
+                "关键词搜索没有返回商品。可以换一个更具体的商品名再试，"
+                "或者直接贴商品链接；绿色建议与风险清单不依赖商品数据，仍然可用。"
+            )
+        else:
+            st.caption(
+                "你的描述里没有可以拿去搜商品的品类词，所以只做需求分析——"
+                "②之后的绿色建议与风险清单不依赖商品数据。"
+            )
     else:
         for product in w.products:
             _render_product_block(product)
@@ -480,7 +492,7 @@ _usage_line = (
 if _usage["blocked_sources"]:
     st.warning(_usage_line + f" · 已达上限的数据源：{'、'.join(_usage['blocked_sources'])}")
 else:
-    st.caption(_usage_line + " · 详见「⑥ 零成本与配额」")
+    st.caption(_usage_line + " · 额度用尽后相关请求会被直接拦下，不会产生费用")
 
 if public_demo():
     st.caption(
@@ -489,17 +501,17 @@ if public_demo():
         "避免陌生访客把开发者自己的接口额度烧完。额度用尽后相关按钮会直接拒绝请求，不会产生费用。"
     )
 
-tab_wise, tab_auto, tab_manual, tab_data, tab_ecom, tab_cost, tab_about = st.tabs(
+tab_wise, tab_auto, tab_manual, tab_about = st.tabs(
     ["① 智选 · 理性消费分析", "② 自动识别与智能比价", "③ 手动录入与自定义权重",
-     "④ 数据与缓存", "⑤ 电商平台接入", "⑥ 零成本与配额", "⑦ 说明与限制"]
+     "④ 说明与限制"]
 )
 
 # ================================================================ ① 智选
 with tab_wise:
     st.markdown("##### 说说你想买什么")
     st.caption(
-        "三种写法都行：**粘贴商品链接** · **只写商品名称** · **直接描述需求**（最推荐）。"
-        f"一次最多 {MAX_LINKS_PER_ANALYSIS} 个链接。不需要填价格、评分或参数。"
+        "三种写法都行：**只写商品名称**（最省事）· **粘贴商品链接** · **直接描述需求**。"
+        f"一次最多 {MAX_LINKS_PER_ANALYSIS} 个链接。不需要填价格、评分或参数，也不需要配置任何 API。"
     )
 
     with st.form("wise_form"):
@@ -507,8 +519,9 @@ with tab_wise:
             "商品链接或购买需求",
             height=110,
             placeholder=(
-                "例 1｜贴链接：https://store.steampowered.com/app/413150/\n"
-                "例 2｜说需求：我的笔记本是联想拯救者 Y7000P，想买个外接显示器，"
+                "例 1｜只写商品名：机械键盘 87 键\n"
+                "例 2｜贴链接：https://store.steampowered.com/app/413150/\n"
+                "例 3｜说需求：我的笔记本是联想拯救者 Y7000P，想买个外接显示器，"
                 "预算 1000 元，每天写代码要用"
             ),
             label_visibility="collapsed",
@@ -544,6 +557,7 @@ with tab_wise:
                         budget_cap=float(cap or 0),
                         auto_discover=auto_discover,
                         use_cache=use_cache,
+                        search_fn=pdd_keyword_search,
                     )
                 except Exception as exc:  # 兜底：不让一次异常把整页打白
                     st.session_state.wise = None
@@ -554,14 +568,14 @@ with tab_wise:
         with st.container(border=True):
             st.markdown("**还没有分析结果。** 三个可以直接复制的例子：")
             st.markdown(
-                "- **数码配件**：我的笔记本是联想拯救者 Y7000P，想买个外接显示器，"
+                "- **只写商品名**：机械键盘 87 键\n"
+                "- **说需求**：我的笔记本是联想拯救者 Y7000P，想买个外接显示器，"
                 "预算 1000 元，每天写代码要用\n"
-                "- **学习用品**：下学期要用的笔记本和记号笔，预算 60 元，每天上课记笔记\n"
                 "- **修还是换**：我现在用的手机电池一天要充三次，想换个新的，预算 3000 元"
             )
             st.caption(
-                "也可以直接贴一个商品链接（Steam 商店页可直接识别价格与口碑）。"
-                "没有链接时，下面的需求分析、绿色建议与风险清单依然完整可用。"
+                "写商品名时会去官方开放接口搜真实商品（名称、价格、店铺、链接）；"
+                "贴 Steam 链接能直接读到价格与口碑。都没有也能用：需求分析、绿色建议与风险清单照常输出。"
             )
     else:
         render_wise(_wise)
@@ -1207,48 +1221,7 @@ with tab_manual:
                 file_name=f"手动对比_{currency}_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv",
             )
 
-# ================================================================ ④ 数据
-with tab_data:
-    st.subheader("本地数据库与采集记录")
-    stats = db.stats()
-    cols = st.columns(3)
-    cols[0].metric("已保存商品", stats["商品数"])
-    cols[1].metric("价格记录", stats["价格记录数"])
-    cols[2].metric("采集日志", stats["采集日志数"])
-    st.caption(f"数据库文件：`{db.path}`（SQLite，只在本机）")
-
-    st.markdown("**价格历史**")
-    saved = db.load_recent(50)
-    if saved:
-        labels = {f"{p.name}（{p.product_id}）": p.product_id for p in saved}
-        chosen = st.selectbox("选择商品", list(labels))
-        history = db.price_history(labels[chosen])
-        if history:
-            st.dataframe(pd.DataFrame(history), hide_index=True, **FIT)
-            st.caption("同一价格不会重复记录；每次价格变化追加一条，可用于观察波动。")
-        else:
-            st.caption("这个商品还没有价格记录。")
-    else:
-        st.caption("数据库中还没有商品。先在上面的自动流程里识别一个商品。")
-
-    st.markdown("**最近 30 条采集日志**")
-    logs = db.recent_logs(30)
-    if logs:
-        st.dataframe(pd.DataFrame(logs), hide_index=True, **FIT)
-        st.caption("失败记录会写明失败类型：blocked=访问限制、robots=网站禁止、notfound=页面不存在、network=网络问题。")
-    else:
-        st.caption("暂无记录。")
-
-    st.divider()
-    c1, c2 = st.columns(2)
-    if c1.button("清空商品与价格历史"):
-        db.clear_products()
-        st.success("已清空商品与价格记录")
-    if c2.button("清空全部（含采集日志）"):
-        db.clear_all()
-        st.success("已清空全部本地数据")
-
-# ================================================================ ⑦ 说明
+# ================================================================ ④ 说明
 with tab_about:
     st.subheader("能力边界（请务必先看这一节）")
     rows = [
@@ -1300,8 +1273,8 @@ with tab_about:
     st.subheader("已知限制")
     st.markdown(
         """
-1. 京东/淘宝天猫/拼多多走**官方开放接口**，但都需要你先申请资质并配置密钥；
-   未配置时这三个平台只能识别链接、不能采集商品（不会退回抓页面）。
+1. 京东/淘宝天猫/拼多多走**官方开放接口**，密钥由服务端统一配置，普通用户不需要自己申请。
+   密钥未就绪时这三个平台只能识别链接、不能采集商品（不会退回抓页面，也不会编价格）。
 2. 三家都是「推广/联盟」口径，只有进入推广池的商品查得到；不是全站商品库。
 3. 三家都**不提供好评率百分比**，也不提供评价正文，因此电商商品没有口碑分，
    推荐结果会标注「数据不足」，不会用销量凑一个假好评率。
@@ -1310,7 +1283,7 @@ with tab_about:
 6. Steam 好评率使用页面提供的**语言维度**汇总口径，与全语言总数可能不同，界面已标注。
 7. 价格是采集时刻的公开标价，不含运费、税费与券后价。
 8. 未做真实用户访谈，推荐权重基于常识设定，可自行调整。
-9. 为保证零成本，每个数据源都有**每日请求上限**，超限当天直接停止外部请求（详见「⑥ 零成本与配额」）。
+9. 为保证零成本，每个数据源都有**每日请求上限**，超限当天直接停止外部请求（页面顶部会显示今日已用次数）。
 10. 免费部署（Streamlit Cloud）的文件系统非持久，重启后本地缓存与价格历史会丢失。
 11. 理性消费分析用的是**规则引擎**（关键词 + 判定表 + 阈值），不是大模型。
     它能识别品类、预算、用途、频率与风险信号，但不懂真正的语义
@@ -1320,247 +1293,13 @@ with tab_about:
 14. 「推荐购买」只在**有真实商品数据**时才会出现；没有价格数据时最多到「建议进一步比较」。
 15. 判定阈值（风险累计 5 分建议暂缓、3 分建议比较）基于常识设定，**没有用真实用户行为校准过**。
 16. 兼容性只能提醒你确认，不能替你判定。因为拿不到你的设备型号，任何「兼容/不兼容」的结论都是猜的。
-11. 大模型增强在零成本模式下**默认禁用**，推荐与建议全部由本地规则算法生成。
+17. 大模型增强在零成本模式下**默认禁用**，推荐与建议全部由本地规则算法生成。
         """
     )
 
     st.caption(
         f"BetterBuy 智选 · 公益版 · 生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
-        "数据来源与算法均可在「④ 数据与缓存」核查。本页所有结论均由规则引擎产生，未调用大模型。"
+        "数据来源与更新时间在每个商品卡片下方列出。本页所有结论均由规则引擎产生，未调用大模型。"
     )
+    st.caption(f"正式站点：{OFFICIAL_URL} · 代码仓库：{GITHUB_URL}（欢迎提交问题与改进）")
 
-# ================================================================ ⑤ 电商平台
-with tab_ecom:
-    st.subheader("电商开放平台接入状态")
-    st.caption(
-        "京东 / 淘宝天猫 / 拼多多的自动识别都走**官方开放接口**，不抓商品页、不绕验证码。"
-        "密钥只在本机后端环境变量里读取，不会出现在网页、前端代码或日志中。"
-    )
-
-    cred_rows = credential_rows()
-    configured_count = sum(1 for row in cred_rows if row["密钥状态"] == "已配置")
-    if configured_count == 0:
-        st.warning(
-            "三家平台都还没有配置密钥，所以现在粘贴京东/淘宝/拼多多链接会明确报"
-            "「未配置密钥」，不会返回任何商品数据。这是刻意设计：宁可什么都不显示，"
-            "也不用估算值或示例数据冒充真实价格。"
-        )
-    else:
-        st.success(f"已配置 {configured_count}/3 个平台，配置好的平台可以直接粘贴链接采集。")
-
-    st.dataframe(pd.DataFrame(cred_rows), hide_index=True, **FIT)
-
-    st.markdown("---")
-    st.subheader("① 各平台需要什么")
-    for item in PLATFORMS:
-        with st.expander(f"{item['label']} · 密钥与接口清单"):
-            st.markdown(f"**网关**：`{item['gateway']}`")
-            st.markdown(f"**接入资格**：{item['qualification']}")
-            st.markdown("**环境变量**（在启动前设置，不要写进代码或网页）")
-            st.dataframe(pd.DataFrame(describe(item["key"])), hide_index=True, **FIT)
-            st.markdown("**用到的接口**")
-            st.dataframe(pd.DataFrame(item["apis"]), hide_index=True, **FIT)
-
-    st.markdown("---")
-    st.subheader("② 每个字段到底能不能拿到")
-    st.caption("这张表是按官方文档整理的，✅ 有、⚠️ 有条件、❌ 接口不提供。取不到的一律显示「数据源未提供」。")
-    st.dataframe(pd.DataFrame(FIELD_MATRIX), hide_index=True, **FIT)
-    st.error(
-        "关键结论：三家都不提供「好评率百分比」，也都不提供评价正文。 "
-        "淘宝只有布尔值 h_good_rate（还需 SA 级权限），拼多多完全没有口碑字段。"
-        "所以这几个平台上的商品，本项目不会算口碑分，推荐结果里会明确标注「数据不足」，"
-        "不会用销量或评价数凑一个假的好评率。"
-    )
-
-    st.markdown("---")
-    st.subheader("③ 链接识别自测（纯本地，不联网、不需要密钥）")
-    probe = st.text_input(
-        "粘贴一个商品链接试试",
-        placeholder="https://item.jd.com/100012043978.html",
-        key="ecom_probe",
-    )
-    if probe.strip():
-        info = detect(probe)
-        if not info.ok:
-            st.error(f"未识别：{info.note}")
-        else:
-            col1, col2, col3 = st.columns(3)
-            col1.metric("平台", info.label)
-            col2.metric("商品 ID", info.item_id or "未取到")
-            col3.metric("是否需要展开短链", "是" if info.is_short else "否")
-            if info.note:
-                st.caption(info.note)
-            if info.item_id:
-                st.code(f"product_id = {info.product_id}", language="text")
-            st.caption(
-                "识别到 ID 之后，采集会走对应平台的官方接口；接口未配置密钥时会明确报错，"
-                "不会退回到抓页面。"
-            )
-
-    st.markdown("---")
-    st.subheader("④ 需要你去申请的权限")
-    st.caption("这些是平台侧的资质，程序无法代办。按这张表逐条办完，把密钥填进环境变量即可。")
-    st.dataframe(pd.DataFrame(permission_checklist()), hide_index=True, **FIT)
-
-    with st.expander("配置好密钥后怎么验证（命令行）"):
-        st.code(
-            "set BETTERBUY_JD_APP_KEY=你的appkey\n"
-            "set BETTERBUY_JD_APP_SECRET=你的secret\n"
-            "python scripts/check_openapi.py --platform jd --live\n",
-            language="bat",
-        )
-        st.caption(
-            "脚本会先检查密钥是否齐全，再做一次真实调用，并打印「请求成功/权限不足/签名错误」"
-            "与返回的字段清单。它不会写入任何商品数据到界面。"
-        )
-
-    with st.expander("拼多多专用自检与错误码对照"):
-        st.code(
-            "python scripts/check_pdd.py                       # 离线：只查配置与参数，不发请求\n"
-            "python scripts/check_pdd.py --live --keyword 机械键盘\n"
-            "python scripts/check_pdd.py --live --detail --link  # 再验详情与转链\n",
-            language="bash",
-        )
-        st.caption(
-            "退出码直接对应失败类型：0 成功 / 2 未配置 / 3 凭证错误 / 4 权限不足 / "
-            "5 需要授权备案 / 6 限流 / 7 无结果 / 8 网络或其他。"
-        )
-        st.dataframe(pd.DataFrame(ERROR_CODE_TABLE), hide_index=True, **FIT)
-
-# ================================================================ ⑥ 零成本
-with tab_cost:
-    st.subheader("零成本运行状态")
-    usage = usage_summary()
-    if usage["zero_cost"]:
-        st.success(
-            "零成本模式已开启。当前所有外部请求都是免费接口（Steam 公开接口/页面 + 三家电商的免费推广接口），"
-            "推荐与建议全部由本地 Python 规则算法生成，不调用任何按量计费的模型接口。"
-        )
-    else:
-        st.error(
-            "零成本模式已关闭。此时若你配置了 BETTERBUY_LLM_* 三项，大模型路径会被启用，"
-            "可能产生费用。开发者阶段建议保持开启。"
-        )
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("今日外部请求", f"{usage['used']} 次")
-    m2.metric("每日上限（合计）", f"{usage['limit']} 次")
-    m3.metric("剩余额度", f"{usage['remaining']} 次")
-    m4.metric("大模型调用", "禁止" if usage["zero_cost"] else "允许")
-
-    if usage["exhausted"]:
-        st.error(
-            "今日额度已用尽，所有外部请求已停止（这是零成本约束的硬性保护）。"
-            "明天自动恢复；也可以按下面的说明调高上限。"
-        )
-    elif usage["blocked_sources"]:
-        st.warning("以下数据源今日已达上限，请求会被直接拦下：" + "、".join(usage["blocked_sources"]))
-
-    st.markdown("---")
-    st.subheader("① 每日调用配额")
-    st.caption(
-        "这些数字是**本项目自设的保守上限**，不是平台公布的免费额度——平台真实额度随账号等级变化，"
-        "以你控制台显示的为准。这里取保守值，是为了在最坏情况下也不会产生账单或触发风控。"
-        "超限时请求不会发出，也不会自动重试。"
-    )
-    st.dataframe(pd.DataFrame(quota_rows()), hide_index=True, **FIT)
-    st.caption(
-        "计数口径：每采集一个商品链接记 1 次；电商开放接口按实际 HTTP 请求记 1 次。"
-        "计数存在本地 SQLite，进程重启不清零，跨天自动从 0 开始。"
-    )
-    with st.expander("怎么调整上限"):
-        st.code(
-            "set BETTERBUY_DAILY_LIMIT_TOTAL=800   # 所有来源合计\n"
-            "set BETTERBUY_DAILY_LIMIT_STEAM=600   # 单个来源\n"
-            "set BETTERBUY_DAILY_LIMIT_JD=200\n"
-            "set BETTERBUY_DAILY_LIMIT_TAOBAO=200\n"
-            "set BETTERBUY_DAILY_LIMIT_PDD=200",
-            language="bat",
-        )
-        st.caption("改完要重启应用才生效。设为 0 表示当天完全禁止该来源的请求。")
-
-    st.markdown("---")
-    st.subheader("② 哪些地方会花钱、哪些不会")
-    for item in COST_ITEMS:
-        with st.container(border=True):
-            st.markdown(f"**{item['项目']}** — {item['费用']}")
-            st.caption(item["说明"])
-
-    st.markdown("---")
-    st.subheader("③ 把数据公开给其他用户看，各平台允许吗")
-    st.caption(
-        "以下是依据各平台公开的推广者协议与接口文档整理的操作要点，不构成法律意见；"
-        "真正上线前请以你签署的协议原文为准。如果拿不准，就先只在本地或小范围试用。"
-    )
-    for item in SHOW_POLICY:
-        with st.container(border=True):
-            st.markdown(f"**{item['平台']}** — {item['能否公开展示']}")
-            st.caption(item["要点"])
-
-    st.markdown("---")
-    st.subheader("④ 免费部署方案")
-    for item in FREE_DEPLOY:
-        with st.container(border=True):
-            st.markdown(f"**{item['方案']}** — {item['费用']} · 适用：{item['适用']}")
-            st.caption(item["要点"])
-    st.warning(
-        "Streamlit Community Cloud 免费档的文件系统不是持久存储：应用休眠或重新部署后，"
-        "本地 SQLite 缓存会丢失，需要重新采集。这不影响功能，只影响「是否命中缓存」。"
-        "如果你需要长期保留价格历史，只能在自己机器上跑，或改用持久化存储（那会产生费用，本版不引入）。"
-    )
-    with st.expander("Streamlit Community Cloud 免费部署步骤"):
-        st.markdown(
-            "1. 把项目推到 GitHub 公开仓库（`data/`、`reports/`、`backups/` 已在 `.gitignore` 里，不会上传）；\n"
-            "2. 打开 https://share.streamlit.io ，用 GitHub 登录；\n"
-            "3. New app → 选仓库与分支 → Main file path 填 `app.py` → Deploy；\n"
-            "4. 需要密钥的话，在 App settings → Secrets 里按 TOML 写，例如：\n"
-            "   ```toml\n"
-            "   BETTERBUY_JD_APP_KEY = \"你的key\"\n"
-            "   BETTERBUY_JD_APP_SECRET = \"你的secret\"\n"
-            "   ```\n"
-            "5. 免费档不需要绑卡，也不会自动升级到付费档。"
-        )
-        st.caption(
-            "本项目没有引入任何需要付费的组件（无云数据库、无对象存储、无模型 API、无监控服务），"
-            "所以免费档就是完整功能，不存在「免费版阉割」。"
-        )
-
-    st.markdown("---")
-    st.subheader("⑤ 零成本能做到 / 做不到")
-    col_yes, col_no = st.columns(2)
-    with col_yes:
-        st.markdown("**可以，而且现在就能跑**")
-        for line in [
-            "粘贴 Steam 链接 → 自动识别商品、价格、好评率、评价数",
-            "自动发现同类竞品（Steam 搜索页）",
-            "多商品对比表、价格图、口碑散点图",
-            "五类推荐（性价比/规格/预算/口碑/综合），每类都写明依据",
-            "规则版购买建议（预算解析、分档替代、确认清单）",
-            "SQLite 缓存 + 价格历史 + 采集时间展示",
-            "京东/淘宝/拼多多的链接识别与商品 ID 提取（不联网）",
-            "每日配额硬限制，超限即停",
-        ]:
-            st.write("· " + line)
-    with col_no:
-        st.markdown("**做不到，或者需要额外条件**")
-        for line in [
-            "京东/淘宝/拼多多的真实价格：需要你申请到推广接口权限（接口本身免费）",
-            "这三家的好评率与评价正文：接口根本不返回，给钱也拿不到",
-            "跨平台「同款」官方标识：平台没有这种接口，只能用标题相似度推断",
-            "评测正文（Steam）：接口返回占位页，拿不到",
-            "云端持久化价格历史：免费档文件系统非持久",
-            "大模型润色过的建议：默认禁用（会产生费用）",
-        ]:
-            st.write("· " + line)
-
-    st.markdown("---")
-    st.subheader("⑥ 如果你以后想改配置")
-    st.code(
-        "BETTERBUY_ZERO_COST=1              # 1=零成本模式（默认），0=允许付费路径\n"
-        "BETTERBUY_DAILY_LIMIT_TOTAL=800    # 所有来源每日合计上限\n"
-        "BETTERBUY_CACHE_TTL=3600           # 缓存有效期（秒），越大越省请求\n"
-        "BETTERBUY_MIN_INTERVAL=1.2         # 同一主机请求最小间隔（秒）\n"
-        "BETTERBUY_DB=data/betterbuy.sqlite3  # 数据库位置",
-        language="bat",
-    )
-    st.caption("这些都在后端环境变量里，不会出现在网页或前端代码中。")
