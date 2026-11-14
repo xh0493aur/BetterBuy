@@ -1,0 +1,8 @@
+# 统一换行：仓库里存 LF，Windows 本地也不被改成 CRLF
+* text=auto eol=lf
+
+# 二进制资源不要做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.sqlite3 binary

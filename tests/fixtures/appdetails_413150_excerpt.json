@@ -1,0 +1,52 @@
+{
+  "_note": "从 2026-11-14 真实响应 https://store.steampowered.com/api/appdetails?appids=413150&cc=cn&l=schinese 中摘录的字段，仅保留单元测试用到的部分。数值未经修改。",
+  "413150": {
+    "success": true,
+    "data": {
+      "type": "game",
+      "name": "Stardew Valley",
+      "steam_appid": 413150,
+      "required_age": 0,
+      "is_free": false,
+      "short_description": "你继承了你爷爷在星露谷留下的老旧农场。带着爷爷留下的残旧工具和几枚硬币开始了你的新生活。",
+      "developers": ["ConcernedApe"],
+      "publishers": ["ConcernedApe"],
+      "genres": [
+        {"id": "23", "description": "独立"},
+        {"id": "3", "description": "角色扮演"},
+        {"id": "28", "description": "模拟"}
+      ],
+      "categories": [
+        {"id": 2, "description": "单人"},
+        {"id": 1, "description": "多人"},
+        {"id": 9, "description": "合作"},
+        {"id": 38, "description": "在线合作"},
+        {"id": 48, "description": "局域网合作"},
+        {"id": 39, "description": "同屏/分屏合作"},
+        {"id": 24, "description": "同屏/分屏"},
+        {"id": 22, "description": "Steam 成就"}
+      ],
+      "platforms": {"windows": true, "mac": true, "linux": true},
+      "metacritic": {
+        "score": 89,
+        "url": "https://www.metacritic.com/game/pc/stardew-valley?ftag=MCD-06-10aaa1f"
+      },
+      "recommendations": {"total": 904859},
+      "release_date": {"coming_soon": false, "date": "2016 年 2 月 26 日"},
+      "price_overview": {
+        "currency": "CNY",
+        "initial": 4800,
+        "final": 4800,
+        "discount_percent": 0,
+        "initial_formatted": "",
+        "final_formatted": "¥ 48.00"
+      },
+      "supported_languages": "英语, 德语, 西班牙语 - 西班牙, 日语, 葡萄牙语 - 巴西, 俄语, 简体中文, 法语, 意大利语, 匈牙利语, 韩语, 土耳其语<br><strong>*</strong>languages with full audio support",
+      "pc_requirements": {
+        "minimum": "<strong>最低配置:</strong><br><ul class=\"bb_ul\"><li><strong>操作系统:</strong> Windows Vista or greater<br></li><li><strong>处理器:</strong> 2 Ghz<br></li><li><strong>内存:</strong> 2 GB RAM</li></ul>"
+      },
+      "header_image": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/413150/header.jpg?t=1786554168",
+      "dlc": [413151]
+    }
+  }
+}

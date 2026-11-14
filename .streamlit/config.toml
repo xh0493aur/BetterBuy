@@ -1,0 +1,10 @@
+# Streamlit 运行时配置（可安全提交，不含任何密钥）
+[server]
+headless = true
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
