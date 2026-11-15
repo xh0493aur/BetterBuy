@@ -54,7 +54,7 @@ class PddUiTests(unittest.TestCase):
         field = find_input(at, "商品关键词")
         self.assertIsNotNone(field, "找不到关键词输入框")
         field.set_value(keyword)
-        button = find_button(at, "搜索拼多多")
+        button = find_button(at, "搜索")
         self.assertIsNotNone(button, "找不到搜索按钮")
         return button.click().run()
 

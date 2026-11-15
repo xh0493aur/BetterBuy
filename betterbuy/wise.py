@@ -25,10 +25,13 @@ from .ration import RationResult, analyze
 from .recommend import Recommendation, recommend
 from .risk import RiskReport, assess
 
-__all__ = ["WiseResult", "extract_urls", "run", "MAX_LINKS_PER_ANALYSIS"]
+__all__ = ["WiseResult", "extract_urls", "search_keyword", "run", "MAX_LINKS_PER_ANALYSIS"]
 
 #: 一次分析最多处理几个链接。公益版强调少操作，3 个足够比较。
 MAX_LINKS_PER_ANALYSIS = 3
+
+#: 关键词搜索要几条。官方对分页的硬限制是 10–100，所以实际最少 10 条。
+SEARCH_LIMIT = 10
 
 _URL_RE = re.compile(r"https?://[^\s，。；、]+", re.I)
 
@@ -58,6 +61,10 @@ class WiseResult:
     discovery: Any | None = None
     facts_ok: bool = False
     used_llm: bool = False
+    #: 本次实际拿去搜商品的关键词（空字符串 = 没搜）。界面据此说明数据从哪来。
+    searched_keyword: str = ""
+    #: 搜索失败时的分类（no_credential / permission / quota / empty …），成功为空。
+    search_kind: str = ""
 
     @property
     def priced(self) -> list[Product]:
@@ -76,6 +83,40 @@ def _facts_ok(products: list[Product]) -> bool:
     return False
 
 
+def _filter_by_budget(products: list[Product], budget_cap: float) -> tuple[list[Product], int]:
+    """按预算上限粗筛搜索结果。
+
+    只做「明显超预算」的排除（1.5 倍以上），不排序也不改价格；
+    过滤后少于 2 件就放弃过滤，否则用户会看到「搜到了但一件都不显示」。
+    """
+    if not budget_cap or budget_cap <= 0:
+        return products, 0
+    ceiling = budget_cap * 1.5
+    kept = [p for p in products if p.offer.price is None or p.offer.price <= ceiling]
+    if len(kept) < 2:
+        return products, 0
+    return kept, len(products) - len(kept)
+
+
+def search_keyword(intent: Intent, text: str) -> str:
+    """从需求里提炼一个「能拿去搜商品」的关键词。
+
+    优先级：命中的品类别名 → 品类名 → 输入本身（仅当它看起来就是个商品名）。
+
+    这里刻意保守：像「我想花 800 元买人体工学椅，主要用来学习和打游戏」这种句子，
+    整句丢给搜索接口只会搜出一堆无关商品，所以宁可退化成品类词。
+    """
+    if intent.matched_alias:
+        return intent.matched_alias
+    if intent.category_key and intent.category_key != "other":
+        return intent.category_name
+    clean = strip_urls(text).strip("，。！？；,.!?; ")
+    # 只在「短、没有分句、没有数字/预算」时才把原话当商品名
+    if 2 <= len(clean) <= 20 and not re.search(r"[，。；,;]", clean) and not re.search(r"\d", clean):
+        return clean
+    return ""
+
+
 def run(
     query: str,
     *,
@@ -86,6 +127,7 @@ def run(
     use_cache: bool = True,
     collect_fn: Callable[..., Product] | None = None,
     discover_fn: Callable[..., Any] | None = None,
+    search_fn: Callable[..., Any] | None = None,
 ) -> WiseResult:
     """执行一次完整分析。
 
@@ -95,6 +137,9 @@ def run(
         budget_cap: 界面上的「预算上限」，会补进需求文本一起解析。
         collect_fn: 采集函数，默认用真实的 :func:`betterbuy.adapters.collect`。
         discover_fn: 竞品发现函数，默认用 :func:`betterbuy.discovery.discover`。
+        search_fn: 关键词搜索函数（默认拼多多官方接口）。**只在用户没贴链接时调用**——
+            普通用户只写一个商品名，也应该看到真实商品，而不是只有建议。
+            不传或返回失败都不影响后续规则分析。
     """
     result = WiseResult(query=query or "", budget_cap=budget_cap)
     raw = (query or "").strip()
@@ -133,8 +178,46 @@ def run(
                 message = getattr(exc, "message", str(exc))
                 result.notes.append(f"❌ `{url[:60]}` 采集失败（{kind}）：{message[:160]}")
 
+    # ---------------- 关键词搜索（没贴链接时也能看到真实商品） ----------------
+    if not result.urls and search_fn is not None:
+        keyword = search_keyword(intent, text)
+        if keyword:
+            result.searched_keyword = keyword
+            try:
+                found = search_fn(keyword, limit=SEARCH_LIMIT)
+            except Exception as exc:  # 搜索失败不该让整页塌掉
+                result.notes.append(f"⚠️ 商品搜索未能完成：{type(exc).__name__} {str(exc)[:120]}")
+            else:
+                ok = bool(getattr(found, "ok", False))
+                harvested = list(getattr(found, "products", []) or [])
+                if ok and harvested:
+                    kept, dropped = _filter_by_budget(harvested, budget_cap)
+                    result.products.extend(kept)
+                    platform = harvested[0].platform or "电商平台"
+                    result.notes.append(
+                        f"ℹ️ 按「{keyword}」在{platform}官方开放接口搜到 {len(harvested)} 件真实商品"
+                        + (f"，其中 {dropped} 件明显超出预算上限，已略去" if dropped else "")
+                        + "（采集时间见下方商品卡片）。"
+                    )
+                elif ok:
+                    result.search_kind = "empty"
+                    result.notes.append(
+                        f"ℹ️ 按「{keyword}」没有搜到商品，下面只给判断与检查清单，不编造价格。"
+                    )
+                else:
+                    kind = getattr(found, "kind", "") or "api"
+                    result.search_kind = kind
+                    message = str(getattr(found, "message", found))[:160]
+                    if kind == "no_credential":
+                        result.notes.append(
+                            "ℹ️ 这次没有取到商品数据（服务端电商接口尚未就绪），"
+                            "所以只给需求判断与检查清单，不用估算值顶替。"
+                        )
+                    else:
+                        result.notes.append(f"⚠️ 商品搜索未成功：{message}")
+
     # ---------------- 竞品发现 ----------------
-    if result.products and auto_discover:
+    if result.urls and result.products and auto_discover:
         first = result.products[0]
         if first.platform == "Steam":
             if discover_fn is None:
@@ -153,7 +236,10 @@ def run(
                     for candidate in discovery.candidates:
                         if len(result.products) >= max_links + 3:
                             break
-                        if any(p.product_id == candidate.product_id for p in result.products):
+                        # Candidate 只有 appid，没有 product_id；这里要自己拼成统一的 id，
+                        # 否则去重会抛 AttributeError，整段竞品搜索被外层 except 吞掉。
+                        candidate_id = f"steam:{candidate.appid}"
+                        if any(p.product_id == candidate_id for p in result.products):
                             continue
                         try:
                             found = collect_fn(candidate.url, use_cache=use_cache)

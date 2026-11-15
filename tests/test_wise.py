@@ -150,11 +150,156 @@ class RunTests(unittest.TestCase):
             discover_fn=fake_discover)
         self.assertEqual(calls["discover"], 0)
 
+    def test_discovery_candidates_are_deduped_by_appid(self):
+        """回归：``Candidate`` 只有 ``appid``，去重时拿 ``product_id`` 会抛 AttributeError，
+        整段竞品采集被外层 except 吞掉——表现是「Steam 自动发现同类商品从来不出结果」。
+        """
+        from betterbuy.discovery.steam_search import Candidate
+
+        candidate = Candidate(
+            appid=105600, name="Terraria", price=42.0, currency="CNY",
+            positive_rate=98.0, review_count=171099, label="好评如潮",
+            image="", url="https://store.steampowered.com/app/105600/",
+        )
+
+        class Result:
+            ok = True
+            candidates = [candidate]
+            note = "测试用"
+
+        collected: list[str] = []
+
+        def fake_collect(url, use_cache=True, ttl=None):
+            if url.endswith("413150/"):
+                return fake_product()
+            collected.append(url)
+            return Product(product_id="steam:105600", platform="Steam", url=url,
+                           name="Terraria", offer=Offer(price=42.0, currency="CNY"),
+                           rating=Rating(positive_rate=98, review_count=171099))
+
+        result = run("https://store.steampowered.com/app/413150/",
+                     collect_fn=fake_collect, discover_fn=lambda product, **kw: Result())
+
+        self.assertIn("https://store.steampowered.com/app/105600/", collected)
+        self.assertTrue(any(p.product_id == "steam:105600" for p in result.products))
+        self.assertFalse(any("竞品搜索未能完成" in note for note in result.notes),
+                         f"竞品采集被异常中断：{result.notes}")
+
     def test_empty_query_is_safe(self):
         result = run("", collect_fn=FakeCollector())
         self.assertEqual(result.products, [])
         self.assertEqual(result.ration.verdict_key, "empty")
         self.assertTrue(result.green.items)
+
+
+class FakeSearch:
+    """假的官方搜索接口：只验证编排层行为，不联网。"""
+
+    ok = True
+    kind = ""
+    used_api = "pdd.ddk.goods.search"
+
+    def __init__(self, products=None, ok=True, kind="", exc=None):
+        self.products = products if products is not None else []
+        self.ok = ok
+        self.kind = kind
+        self.exc = exc
+        self.calls: list[str] = []
+
+    def __call__(self, keyword, limit=10):
+        self.calls.append(keyword)
+        if self.exc:
+            raise self.exc
+        return self
+
+
+def pdd_product(index: int, price: float) -> Product:
+    product = Product(product_id=f"pdd:{index}", platform="拼多多", url="",
+                      name=f"机械键盘 87 键 第 {index} 款")
+    product.offer = Offer(price=price, currency="CNY", source_key="pdd")
+    product.specs = {"店铺": "某旗舰店"}
+    product.origin = "search"
+    product.recompute_missing()
+    return product
+
+
+class SearchKeywordTests(unittest.TestCase):
+    def test_alias_wins_over_whole_sentence(self):
+        from betterbuy.intent import parse_intent
+        from betterbuy.wise import search_keyword
+
+        text = "我想花 800 元购买人体工学椅，主要用来学习和打游戏"
+        self.assertEqual(search_keyword(parse_intent(text), text), "人体工学椅")
+
+    def test_owned_device_does_not_become_keyword(self):
+        from betterbuy.intent import parse_intent
+        from betterbuy.wise import search_keyword
+
+        text = "我的笔记本是拯救者 Y7000P，想买个外接显示器，预算 1000"
+        keyword = search_keyword(parse_intent(text), text)
+        self.assertEqual(keyword, "显示器")
+
+    def test_short_name_without_category_is_used_as_is(self):
+        from betterbuy.intent import parse_intent
+        from betterbuy.wise import search_keyword
+
+        self.assertEqual(search_keyword(parse_intent("星巴克杯子"), "星巴克杯子"), "星巴克杯子")
+
+    def test_long_unrecognised_sentence_is_not_searched(self):
+        from betterbuy.intent import parse_intent
+        from betterbuy.wise import search_keyword
+
+        text = "最近有点想买点什么，但是还没想好要买啥，先看看再说吧"
+        self.assertEqual(search_keyword(parse_intent(text), text), "")
+
+
+class KeywordSearchFlowTests(unittest.TestCase):
+    def test_successful_search_feeds_products_and_recommendation(self):
+        fake = FakeSearch([pdd_product(1, 199.0), pdd_product(2, 359.0)])
+        result = run("机械键盘 87 键", search_fn=fake, collect_fn=FakeCollector())
+        self.assertEqual(fake.calls, ["机械键盘"])
+        self.assertEqual(len(result.products), 2)
+        self.assertTrue(result.facts_ok)
+        self.assertIsNotNone(result.rec)
+        self.assertIsNotNone(result.advice)
+        self.assertTrue(any("真实商品" in n for n in result.notes))
+
+    def test_no_credential_is_reported_quietly(self):
+        fake = FakeSearch(ok=False, kind="no_credential")
+        result = run("机械键盘 87 键", search_fn=fake, collect_fn=FakeCollector())
+        self.assertEqual(result.products, [])
+        self.assertEqual(result.search_kind, "no_credential")
+        # 用 ℹ️ 而不是 ⚠️：这不是用户的错，也不该吓到普通用户
+        self.assertTrue(all(not n.startswith("⚠️") for n in result.notes))
+        self.assertTrue(any("没有取到商品数据" in n for n in result.notes))
+        # 没数据也要给出判断、绿色建议与风险清单
+        self.assertTrue(result.ration.verdict)
+        self.assertTrue(result.green.items)
+        self.assertTrue(result.risk.items)
+
+    def test_budget_cap_drops_obvious_outliers(self):
+        fake = FakeSearch([pdd_product(1, 100.0), pdd_product(2, 140.0), pdd_product(3, 900.0)])
+        result = run("机械键盘 87 键", budget_cap=100, search_fn=fake, collect_fn=FakeCollector())
+        self.assertEqual(len(result.products), 2)
+        self.assertTrue(any("超出预算" in n for n in result.notes))
+
+    def test_search_exception_does_not_break_analysis(self):
+        fake = FakeSearch(exc=RuntimeError("模拟超时"))
+        result = run("机械键盘 87 键", search_fn=fake, collect_fn=FakeCollector())
+        self.assertEqual(result.products, [])
+        self.assertTrue(any("商品搜索未能完成" in n for n in result.notes))
+        self.assertTrue(result.green.items)
+
+    def test_links_skip_search(self):
+        fake = FakeSearch([pdd_product(1, 199.0)])
+        run("https://store.steampowered.com/app/413150/", search_fn=fake,
+            collect_fn=FakeCollector())
+        self.assertEqual(fake.calls, [], "贴了链接不该再搜关键词")
+
+    def test_no_search_fn_keeps_old_behaviour(self):
+        result = run("机械键盘 87 键", collect_fn=FakeCollector())
+        self.assertEqual(result.products, [])
+        self.assertEqual(result.searched_keyword, "")
 
 
 if __name__ == "__main__":
