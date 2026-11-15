@@ -188,6 +188,46 @@ class SmokeTests(unittest.TestCase):
         # 没有商品数据时必须说清楚，而不是编一个价格
         self.assertTrue(any("笔记本" in m for m in joined.split("，")))
 
+    def test_stale_wise_module_degrades_instead_of_crashing(self):
+        """线上进程缓存旧 betterbuy.wise 时（新 app.py + 旧 run 函数），不能整页报红。
+
+        真实事故：用户点「帮我分析」看到
+        TypeError: run() got an unexpected keyword argument 'search_fn'。
+        这里模拟一个没有 search_fn 参数的旧 run，验证降级提示与结果仍可用。
+        """
+        from betterbuy import wise as wise_mod
+
+        real_run = wise_mod.run
+
+        def legacy_run(query, *, category_key="", budget_cap=0.0, auto_discover=True,
+                       max_links=3, use_cache=True, collect_fn=None, discover_fn=None):
+            return real_run(
+                query, category_key=category_key, budget_cap=budget_cap,
+                auto_discover=auto_discover, max_links=max_links, use_cache=use_cache,
+            )
+
+        with mock.patch.object(wise_mod, "run", legacy_run):
+            at = self._run_wise("机械键盘 87 键")
+
+        self.assertEqual(list(at.exception), [])
+        self.assertFalse(
+            any("分析过程出错" in e.value for e in at.error),
+            [e.value for e in at.error],
+        )
+        warnings = " ".join(w.value for w in at.warning)
+        self.assertIn("上一个版本", warnings)
+        self.assertIn("Reboot", warnings)
+        # 降级后仍然出完整结果，而不是白页
+        headers = [s.value for s in at.subheader]
+        self.assertIn("⑤ 购买风险提醒", headers)
+
+    def test_footer_shows_build_version(self):
+        """页脚带构建版本，便于排查「页面是新的、后端模块是旧的」。"""
+        from betterbuy.site import BUILD
+
+        at = self._run()
+        self.assertIn(BUILD, " ".join(c.value for c in at.caption))
+
     def test_compare_page_holds_links_and_manual_entry(self):
         """「商品对比」一页装下链接比价与手动录入，不再各占一个页签。"""
         at = self._run(self.urls)

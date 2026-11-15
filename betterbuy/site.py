@@ -11,9 +11,14 @@
 """
 from __future__ import annotations
 
-__all__ = ["OFFICIAL_URL", "GITHUB_REPO", "GITHUB_URL", "MAIN_FILE", "PROJECT_NAME"]
+__all__ = ["OFFICIAL_URL", "GITHUB_REPO", "GITHUB_URL", "MAIN_FILE", "PROJECT_NAME", "BUILD"]
 
 PROJECT_NAME = "BetterBuy 智选"
+
+#: 构建标记。每次面向用户的改动都 +1，页脚会显示。
+#: 用途：排查「页面是新的、后端模块还是旧的」这类云端进程缓存问题——
+#: 用户报错时先问一句页脚显示的版本，比猜快得多。
+BUILD = "2026-11-15.3"
 
 #: 正式官网（Streamlit Community Cloud 应用）。线上唯一入口。
 OFFICIAL_URL = "https://betterbuy-ewtcn8eechfdqdrr2zymch.streamlit.app/"

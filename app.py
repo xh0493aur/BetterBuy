@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import io
 from datetime import datetime
 
@@ -38,7 +39,7 @@ from betterbuy.pdd_search import search as pdd_keyword_search
 from betterbuy.ration import MODE_LABEL as RATION_MODE_LABEL
 from betterbuy.recommend import DEFAULT_WEIGHTS, PICK_ORDER, PICK_TITLES, recommend
 from betterbuy.risk import LEVEL_HIGH, LEVEL_OK, LEVEL_TODO
-from betterbuy.site import GITHUB_URL, OFFICIAL_URL, PROJECT_NAME
+from betterbuy.site import BUILD, GITHUB_URL, OFFICIAL_URL, PROJECT_NAME
 from betterbuy.wise import MAX_LINKS_PER_ANALYSIS, run as run_wise
 from betterbuy.zero_cost import daily_limit, public_demo, usage_summary
 from scoring import score_items
@@ -234,15 +235,16 @@ def _analysis_meta(w) -> str:
     而不是埋进折叠面板里。
     """
     parts = ["分析方式：规则引擎（非大模型）"]
+    kw = getattr(w, "searched_keyword", "")
     if w.products:
         platforms = sorted({p.platform for p in w.products if p.platform})
         parts.append(f"数据来源：{'、'.join(platforms)} 官方公开接口 · {len(w.products)} 件商品")
         stamp = _data_stamp(w)
         parts.append(f"数据更新时间：{stamp}" if stamp else "数据更新时间：未记录")
-        if w.searched_keyword:
-            parts.append(f"搜索关键词：{w.searched_keyword}")
-    elif w.searched_keyword:
-        parts.append(f"数据来源：无（按「{w.searched_keyword}」搜索未取到商品，只做需求分析）")
+        if kw:
+            parts.append(f"搜索关键词：{kw}")
+    elif kw:
+        parts.append(f"数据来源：无（按「{kw}」搜索未取到商品，只做需求分析）")
     else:
         parts.append("数据来源：无（本次只做需求分析）")
     return " · ".join(parts)
@@ -301,18 +303,19 @@ def render_wise(w) -> None:
     # ---------------- ① 商品信息 ----------------
     st.markdown("---")
     st.subheader("① 商品信息与可用数据")
-    if w.searched_keyword:
-        st.caption(f"本次用的搜索关键词：「{w.searched_keyword}」（来自你输入里的商品名/品类词）")
+    _kw = getattr(w, "searched_keyword", "")
+    if _kw:
+        st.caption(f"本次用的搜索关键词：「{_kw}」（来自你输入里的商品名/品类词）")
     if not w.products:
         st.warning("本次没有采集到商品数据，所以下面不会出现任何价格、评分或商品卡片。")
         if w.urls:
             st.caption("链接采集失败的原因见上方提示。本项目不会用示例数据填补空缺。")
-        elif w.search_kind == "no_credential":
+        elif getattr(w, "search_kind", "") == "no_credential":
             st.caption(
                 "服务端还没有可用的电商接口密钥，所以这次只能做需求分析。"
                 "换成 Steam 商品链接可以直接读到价格与口碑；绿色建议与风险清单不依赖商品数据。"
             )
-        elif w.searched_keyword:
+        elif _kw:
             st.caption(
                 "关键词搜索没有返回商品。可以换一个更具体的商品名再试，"
                 "或者直接贴商品链接；绿色建议与风险清单不依赖商品数据，仍然可用。"
@@ -666,22 +669,35 @@ with tab_wise:
         if not query.strip():
             st.warning("先写一句你想买什么，或者贴一个商品链接。")
         else:
+            _wise_kwargs: dict = {
+                "category_key": (
+                    key_of_name(st.session_state["wise_category"])
+                    if st.session_state["wise_category"] != "自动识别" else ""
+                ),
+                "budget_cap": float(cap or 0),
+                "auto_discover": bool(st.session_state["wise_discover"]),
+                "use_cache": bool(st.session_state["use_cache"]),
+            }
+            # 云端进程可能缓存着上一版 betterbuy.wise（新 app.py + 旧 run 函数对象），
+            # 无脑传 search_fn 会 TypeError 把整页打红。按实际签名决定传不传：
+            # 命中旧模块时退化成「贴链接 / 说需求」仍可用，只丢关键词搜索，并提示重启。
+            _stale_module = "search_fn" not in inspect.signature(run_wise).parameters
+            if not _stale_module:
+                _wise_kwargs["search_fn"] = pdd_keyword_search
+
             with st.spinner("正在识别商品、解析需求、生成建议…"):
                 try:
-                    st.session_state.wise = run_wise(
-                        query,
-                        category_key=(
-                            key_of_name(st.session_state["wise_category"])
-                            if st.session_state["wise_category"] != "自动识别" else ""
-                        ),
-                        budget_cap=float(cap or 0),
-                        auto_discover=bool(st.session_state["wise_discover"]),
-                        use_cache=bool(st.session_state["use_cache"]),
-                        search_fn=pdd_keyword_search,
-                    )
+                    st.session_state.wise = run_wise(query, **_wise_kwargs)
                 except Exception as exc:  # 兜底：不让一次异常把整页打白
                     st.session_state.wise = None
                     st.error(f"分析过程出错：{type(exc).__name__} {str(exc)[:160]}")
+            if _stale_module:
+                st.warning(
+                    "当前运行的分析模块还是上一个版本（云端进程缓存未刷新），已用兼容方式完成分析。"
+                    "「只写商品名」的关键词搜索暂时不可用；到 Streamlit Cloud 的 "
+                    "Manage app → Reboot 重启应用后即恢复，不需要改代码。"
+                    f"（页面版本 {BUILD}）"
+                )
 
     _wise = st.session_state.get("wise")
     if not _wise:
@@ -1496,6 +1512,6 @@ with tab_about:
     )
     st.caption(
         f"本页所有结论均由规则引擎产生，未调用大模型 · 内容更新于 "
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M')} · 页面版本 {BUILD}"
     )
 
